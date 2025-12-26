@@ -225,17 +225,29 @@ function CheckControllerValidLoop()
 	}
 	else
 	{
-		const c = controllers[0];
-		if(c.mapping == "standard")
+		try
 		{
-			GlobalTransientControllerValid = true;
-			var img = document.getElementById("controllerIMG");
-			if(img != null)
-				img.className = "fadeImage";
+			const c = controllers[0];
+			if(c.mapping == "standard")
+			{
+				GlobalTransientControllerValid = true;
+				var img = document.getElementById("controllerIMG");
+				if(img != null)
+					img.className = "fadeImage";
+				else
+					GlobalTransientCheckControllerLoop = false;
+			}
 			else
-				GlobalTransientCheckControllerLoop = false;
+			{
+				GlobalTransientControllerValid = false;
+				var img = document.getElementById("controllerIMG");
+				if(img != null)
+					img.className = "disableImage";
+				else
+					GlobalTransientCheckControllerLoop = false;
+			}
 		}
-		else
+		catch(e)
 		{
 			GlobalTransientControllerValid = false;
 			var img = document.getElementById("controllerIMG");
@@ -459,18 +471,18 @@ function OnKeyDown(e)
 
 	// Debug Commands
 	// Will have no effect if the shuffler was not compiled with debug enabled
-	switch(e.code)
-	{
-	case "Digit1": _DebugSetGame(1); return;
-	case "Digit2": _DebugSetGame(2); return;
-	case "Digit3": _DebugSetGame(3); return;
-	case "Digit4": _DebugSetGame(4); return;
-	case "Digit5": _DebugSetGame(5); return;
-	case "Digit6": _DebugEnableStep(); return;
-	case "Digit7": _DebugDoStep(); return;
-	case "Digit8": _DebugSave(); return;
-	case "Digit9": _DebugStart(); return;
-	}
+	//switch(e.code)
+	//{
+	//case "Digit1": _DebugSetGame(1); return;
+	//case "Digit2": _DebugSetGame(2); return;
+	//case "Digit3": _DebugSetGame(3); return;
+	//case "Digit4": _DebugSetGame(4); return;
+	//case "Digit5": _DebugSetGame(5); return;
+	//case "Digit6": _DebugEnableStep(); return;
+	//case "Digit7": _DebugDoStep(); return;
+	//case "Digit8": _DebugSave(); return;
+	//case "Digit9": _DebugStart(); return;
+	//}
 }
 
 function OnKeyUp(e)

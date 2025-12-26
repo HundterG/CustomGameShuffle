@@ -17,7 +17,8 @@ public:
 
 	void GetBuffer(float outSamples[], int samplesToGet)
 	{
-		emscripten_lock_waitinf_acquire(&lock);
+		// Some browsers do not allow async in the audio thread
+		emscripten_lock_busyspin_waitinf_acquire(&lock);
 		bool underflowDetected = false;
 
 		for(unsigned int i=0 ; i<samplesToGet ; ++i)

@@ -16,9 +16,9 @@
 #include <cstdlib>
 #include "xml/pugixml.cpp"
 
-#define SERVER_LOCATION "ws://localhost:8085/"
+#define SERVER_LOCATION "wss://localhost:8085/"
 
-// /home/dev/Desktop/emscript/emsdk/upstream/emscripten/emcc main.cpp -o ../Client/main.html -sEXPORTED_FUNCTIONS=_ResizeCall,_main,_DoInput,_DebugSetGame,_DebugSave,_DebugEnableStep,_DebugDoStep,_DebugStart -sEXPORTED_RUNTIME_METHODS=[HEAPU8] --embed-file files@/ -sAUDIO_WORKLET -sWASM_WORKERS -sNO_DISABLE_EXCEPTION_CATCHING -s TOTAL_MEMORY=268435456 -lwebsocket.js
+// /home/dev/Desktop/emscript/emsdk/upstream/emscripten/emcc main.cpp -o ../Client/main.html -sEXPORTED_FUNCTIONS=_ResizeCall,_main,_DoInput,_DebugSetGame,_DebugSave,_DebugEnableStep,_DebugDoStep,_DebugStart -sEXPORTED_RUNTIME_METHODS=[HEAPU8] --embed-file files@/ -sAUDIO_WORKLET=1 -sWASM_WORKERS=1 -sNO_DISABLE_EXCEPTION_CATCHING=1 -s TOTAL_MEMORY=268435456 -lwebsocket.js
 
 #if defined(CGS_DEBUG_COMMANDS)
 // Maybe someday ill include the full thing
@@ -95,6 +95,7 @@ EM_JS(void, SetProgress, (int p), {
 
 EM_JS(void, SetError, (), {
 	var box = document.querySelector('.box');
+	resizeCodeReady = false;
 	box.innerHTML = "<div class='errorText'>A setup error has occurred</div>";
 });
 
@@ -386,7 +387,6 @@ void Idle(void)
 		EmscriptenWebSocketCreateAttributes attr;
 		emscripten_websocket_init_create_attributes(&attr);
 		attr.url = SERVER_LOCATION;
-		attr.protocols = "binary";
 		// This variable is dumb
 		attr.createOnMainThread = true;
 		serverConnection = emscripten_websocket_new(&attr);
@@ -468,6 +468,8 @@ void Tick(void)
 	int debugTicks = 0;
 	double debugLastTime = 0;
 
+	WriteLog("Entering Tick\n");
+
 	while(loadStage == LoadStage::InProgress)
 	{
 		double t = emscripten_performance_now();
@@ -523,6 +525,8 @@ void Tick(void)
 			debugLastTime = t;
 		}
 	}
+
+	WriteLog("Exiting Tick\n");
 }
 
 bool OnServerOpen(int /*eventType*/, const EmscriptenWebSocketOpenEvent *e, void*)
@@ -552,8 +556,16 @@ bool OnServerMessage(int /*eventType*/, const EmscriptenWebSocketMessageEvent *e
 			{
 				if(loadStage != LoadStage::InProgress)
 				{
+					WriteLog("Starting Shuffle\n");
 					loadStage = LoadStage::InProgress;
 					emulatorTickThread = emscripten_malloc_wasm_worker(1024 * 1024); // 1MB
+					WriteLog("Thread: %i\n", int(emulatorTickThread));
+					if(emulatorTickThread == 0)
+					{
+						SetError();
+						loadStage = LoadStage::AfterGame;
+						throw "Tick thread was not started\n";
+					}
 					emscripten_wasm_worker_post_function_v(emulatorTickThread, Tick);
 				}
 				SetPreGame(0);
@@ -599,12 +611,14 @@ bool OnServerMessage(int /*eventType*/, const EmscriptenWebSocketMessageEvent *e
 bool OnServerClose(int /*eventType*/, const EmscriptenWebSocketCloseEvent *e, void*)
 {
 	SetError();
+	loadStage = LoadStage::AfterGame;
 	throw "Connection has been interupted\n";
 }
 
 bool OnServerError(int /*eventType*/, const EmscriptenWebSocketErrorEvent *e, void*)
 {
 	SetError();
+	loadStage = LoadStage::AfterGame;
 	throw "Could not connect to server\n";
 }
 

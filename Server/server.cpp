@@ -8,6 +8,10 @@
 #include <atomic>
 #include <vector>
 
+// https://stackoverflow.com/questions/59738140/why-is-firefox-not-trusting-my-self-signed-certificate
+
+#define IXWEBSOCKET_USE_TLS
+#define IXWEBSOCKET_USE_OPEN_SSL
 #include "ixwebsocket/IXCancellationRequest.cpp"
 #include "ixwebsocket/IXConnectionState.cpp"
 #include "ixwebsocket/IXDNSLookup.cpp"
@@ -22,7 +26,9 @@
 #include "ixwebsocket/IXSocket.cpp"
 #include "ixwebsocket/IXSocketConnect.cpp"
 #include "ixwebsocket/IXSocketFactory.cpp"
+#include "ixwebsocket/IXSocketOpenSSL.cpp"
 #include "ixwebsocket/IXSocketServer.cpp"
+#include "ixwebsocket/IXSocketTLSOptions.cpp"
 #include "ixwebsocket/IXStrCaseCompare.cpp"
 #include "ixwebsocket/IXUrlParser.cpp"
 #include "ixwebsocket/IXUserAgent.cpp"
@@ -175,6 +181,8 @@ int main(int argc, char *args[])
 	argGetter.set_optional<int>("t", "time", 30 * 60, "Total time in seconds of the event (when generating randomly)");
 	argGetter.set_optional<std::string>("i", "input", std::string(), "File with shuffle parameters to use");
 	argGetter.set_optional<std::string>("o", "output", std::string(), "File to save generated shuffle list to (will exit after saving)");
+	argGetter.set_optional<std::string>("k", "certKey", std::string(), "SSL key file");
+	argGetter.set_optional<std::string>("q", "certFile", std::string(), "SSL cert file");
 	argGetter.run_and_exit_if_error();
 
 	{
@@ -261,6 +269,12 @@ int main(int argc, char *args[])
 	ix::WebSocketServer server(argGetter.get<int>("p"), "0.0.0.0", ix::SocketServer::kDefaultTcpBacklog, 256, ix::WebSocketServer::kDefaultHandShakeTimeoutSecs, ix::SocketServer::kDefaultAddressFamily);
 	server.setOnClientMessageCallback(ClientCallbackFn);
 	server.disablePerMessageDeflate();
+	ix::SocketTLSOptions secure;
+	secure.certFile = argGetter.get<std::string>("q");
+	secure.keyFile = argGetter.get<std::string>("k");
+	secure.tls = true;
+	secure.caFile = "NONE";
+	server.setTLSOptions(secure);
 	if(server.listenAndStart() == false)
 	{
 		std::cout << "ERROR: Server failed to start\n";

@@ -72,7 +72,9 @@ namespace CommonVideo
 
 	GLuint GetTexture(int size)
 	{
-		// init texture to black
+		uint8_t *black = new uint8_t[size * size * 4];
+		for(int i=0 ; i<(size * size * 4) ; ++i)
+			black[i] = 0;
 		GLuint GLTexture = 0;
 		glGenTextures(1, &GLTexture);
 		glActiveTexture(GL_TEXTURE0);
@@ -86,8 +88,9 @@ namespace CommonVideo
 			size, size, 0, 
 			GL_RGBA, 
 			GL_UNSIGNED_BYTE, 
-			nullptr);
+			black);
 		glBindTexture(GL_TEXTURE_2D, 0);
+		delete [] black;
 		return GLTexture;
 	}
 

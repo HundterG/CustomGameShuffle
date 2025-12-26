@@ -1,0 +1,5 @@
+<list>
+	<file path="Client/index.htm" uri="index.htm" mime="text/html" cache="false" default="true" />
+	<file path="Client/style.css" uri="style.css" mime="text/css" cache="false" />
+	<file path="Client/favicon.ico" uri="favicon.ico" mime="image/vnd.microsoft.icon" />
+</list>
