@@ -1,9 +1,0 @@
-1
-TEST
-
-Example of what a gamelist currently looks like. To be replaced with xml at a later date.
-GBA 2in1.gba 2in1_state.bin
-GBA pacman.gba pacman_state.bin OnFrameSet:33639262=6 AudioMultiplier=1
-GB  ham.gbc ham_state.bin
-GB  pp.gbc pp_state.bin OnFrameSet:54429=1
-NES SuperMarioBros.nes OnFrameSet:1882=8

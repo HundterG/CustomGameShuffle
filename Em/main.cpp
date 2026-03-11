@@ -93,10 +93,13 @@ EM_JS(void, SetProgress, (int p), {
 	console.log("Progress " + p + "%");
 });
 
-EM_JS(void, SetError, (), {
+EM_JS(void, SetError, (int setup), {
 	var box = document.querySelector('.box');
 	resizeCodeReady = false;
-	box.innerHTML = "<div class='errorText'>A setup error has occurred</div>";
+	if(setup != 0)
+		box.innerHTML = "<div class='errorText'>A setup error has occurred</div>";
+	else
+		box.innerHTML = "<div class='errorText'>An error has occurred</div>";
 });
 
 EM_JS(void, SetTimer, (int min, float sec), {
@@ -164,6 +167,8 @@ namespace
 	std::vector<GameBase*> Games;
 	// A B L R Left Right Up Down
 	bool buttons[8] = {false, false, false, false, false, false, false, false};
+	unsigned char tempXMLBuffer[1024 + 4];
+	int tempXMLBufferSize = 0;
 
 #if defined(CGS_DEBUG_COMMANDS)
 	bool debugEnableStep = false;
@@ -193,7 +198,8 @@ namespace
 	LoadStage loadStage = LoadStage::Entry;
 	int targetGameCount = 0;
 	int tempLoopCounter = 0;
-	std::ifstream gameListFile;
+	pugi::xml_document gameListFile;
+	pugi::xml_node gameWalker;
 	// Needs to be manually set in previous state
 	double stageStartTime = 0;
 	int remainingTime = 0;
@@ -306,64 +312,73 @@ void Idle(void)
 		break;
 
 	case LoadStage::OpenGameListFile:
-		// make gamelist an xml file
-		gameListFile.open("GameList.txt");
-		if(gameListFile.is_open())
+	{
+		pugi::xml_parse_result result = gameListFile.load_file("GameList.xml");
+		if(result)
 		{
-			std::string line;
-			if(std::getline(gameListFile, line))
+			auto listNode = gameListFile.child("list");
+			if(listNode.empty())
 			{
-				targetGameCount = std::stoi(line);
-				tempLoopCounter = 0;
-				loadStage = LoadStage::SetupEmulators_Game;
-			}
-			else
-			{
-				SetError();
+				SetError(true);
 				throw "GameList could not be loaded\n";
 			}
+
+			targetGameCount = 0;
+			for(auto gameNode : listNode.children("game"))
+				++targetGameCount;
+			tempLoopCounter = 0;
+			gameWalker = listNode.child("game");
+			loadStage = LoadStage::SetupEmulators_Game;
 		}
 		else
 		{
-			SetError();
+			SetError(true);
 			throw "GameList could not be loaded\n";
 		}
+	}
 		break;
 
 	case LoadStage::SetupEmulators_Game:
 	{
 		if(tempLoopCounter < targetGameCount)
 		{
-			std::string line;
-			if(std::getline(gameListFile, line))
+			auto typeAttribute = gameWalker.attribute("type");
+			auto cmdAttribute = gameWalker.attribute("command");
+			if(!typeAttribute.empty())
 			{
-				std::string code = line.substr(0, 4);
 				GameBase *newGame = &NullGame;
-				//if(code == "GB  ")
-				if(code == "TEST")
+				if(std::strncmp(typeAttribute.as_string(), "TEST", 5) == 0)
 					newGame = new GLGears();
-				else if(code == "GB  ")
+				else if(std::strncmp(typeAttribute.as_string(), "GB", 3) == 0)
 					newGame = new GBEmu();
-				else if(code == "GBA ")
+				else if(std::strncmp(typeAttribute.as_string(), "GBA", 4) == 0)
 					newGame = new GBAEmu();
-				else if(code == "NES ")
+				else if(std::strncmp(typeAttribute.as_string(), "NES", 4) == 0)
 					newGame = new NESEmu();
-				std::string config = line.substr(4);
-				newGame->Init(config);
+				else
+				{
+					SetError(true);
+					throw "GameList game had an unknown type\n";
+				}
+				std::string command = cmdAttribute.as_string();
+				newGame->Init(command);
 				Games.push_back(newGame);
 				++tempLoopCounter;
 				SetProgress(int((float(tempLoopCounter)/targetGameCount) * 30) + 40);
+				gameWalker = gameWalker.next_sibling("game");
 			}
 			else
 			{
-				SetError();
+				SetError(true);
 				throw "GameList could not be read\n";
 			}
 		}
 		else
 		{
-			gameListFile.close();
+			gameWalker = pugi::xml_node();
+			gameListFile.reset();
 			tempLoopCounter = 0;
+			targetGameCount = Games.size();
 			loadStage = LoadStage::SetupEmulators_Render;
 		}
 	}
@@ -392,7 +407,7 @@ void Idle(void)
 		serverConnection = emscripten_websocket_new(&attr);
 		if(serverConnection <= 0)
 		{
-			SetError();
+			SetError(true);
 			throw "Could not create websocket\n";
 		}
 		emscripten_websocket_set_onopen_callback(serverConnection, nullptr, OnServerOpen);
@@ -409,7 +424,7 @@ void Idle(void)
 	case LoadStage::BetweenServerAndWait:
 		if(stageStartTime + 10000 < emscripten_performance_now())
 		{
-			SetError();
+			SetError(true);
 			throw "No response from server\n";
 		}
 		break;
@@ -539,87 +554,146 @@ bool OnServerOpen(int /*eventType*/, const EmscriptenWebSocketOpenEvent *e, void
 	return false;
 }
 
+void ParseXMLMessage(char const *msg, int size)
+{
+	WriteLogBuffer(msg, size, true);
+
+	try
+	{
+		pugi::xml_document doc;
+		pugi::xml_parse_result result = doc.load_buffer(msg, size);
+		if(!result)
+			return;
+			
+		auto switchNode = doc.child("swi");
+		if(!switchNode.empty())
+		{
+			if(loadStage != LoadStage::InProgress)
+			{
+				WriteLog("Starting Shuffle\n");
+				loadStage = LoadStage::InProgress;
+				emulatorTickThread = emscripten_malloc_wasm_worker(1024 * 1024); // 1MB
+				WriteLog("Thread: %i\n", int(emulatorTickThread));
+				if(emulatorTickThread == 0)
+				{
+					SetError(false);
+					loadStage = LoadStage::AfterGame;
+					throw "Tick thread was not started\n";
+				}
+				emscripten_wasm_worker_post_function_v(emulatorTickThread, Tick);
+			}
+			SetPreGame(0);
+			stageStartTime = emscripten_performance_now();
+			auto timeAttribute = switchNode.attribute("time");
+			int time = timeAttribute.as_int();
+			if(0 < time)
+				remainingTime = time;
+			auto gameAttribute = switchNode.attribute("game");
+			SetGameIndex(gameAttribute.as_int());
+			return;
+		}
+
+		auto preNode = doc.child("pre");
+		if(!preNode.empty())
+		{
+			SetPreGame(1);
+			auto timeAttribute = preNode.attribute("len");
+			int time = timeAttribute.as_int();
+			if(0 < time)
+			{
+				int minutes = time / 60;
+				int seconds = time % 60;
+				SetTimer(minutes, seconds);
+			}
+			loadStage = LoadStage::WaitForStart;
+			return;
+		}
+
+		auto endNode = doc.child("end");
+		if(!endNode.empty())
+		{
+			SetTimerTime();
+			stageStartTime = emscripten_performance_now();
+			loadStage = LoadStage::GameEndWait;
+			return;
+		}
+	}
+	catch(...)
+	{
+		WriteLog("Error processing tag\n");
+	}
+}
+
+int FindCharacter(unsigned char const *string, int length, unsigned char c)
+{
+	for(int i=0 ; i<length ; ++i)
+	{
+		if(string[i] == c)
+			return i;
+	}
+	return INT_MIN;
+}
+
 bool OnServerMessage(int /*eventType*/, const EmscriptenWebSocketMessageEvent *e, void*)
 {
-	if(e->data)
+	if(e->data && 0 < e->numBytes)
 	{
-		WriteLog("%s\n", e->data);
-		do
+		if(1024 < tempXMLBufferSize + e->numBytes)
 		{
-			pugi::xml_document doc;
-			pugi::xml_parse_result result = doc.load_string(reinterpret_cast<char*>(e->data));
-			if(!result)
-				break;
-			
-			auto switchNode = doc.child("swi");
-			if(!switchNode.empty())
-			{
-				if(loadStage != LoadStage::InProgress)
-				{
-					WriteLog("Starting Shuffle\n");
-					loadStage = LoadStage::InProgress;
-					emulatorTickThread = emscripten_malloc_wasm_worker(1024 * 1024); // 1MB
-					WriteLog("Thread: %i\n", int(emulatorTickThread));
-					if(emulatorTickThread == 0)
-					{
-						SetError();
-						loadStage = LoadStage::AfterGame;
-						throw "Tick thread was not started\n";
-					}
-					emscripten_wasm_worker_post_function_v(emulatorTickThread, Tick);
-				}
-				SetPreGame(0);
-				stageStartTime = emscripten_performance_now();
-				auto timeAttribute = switchNode.attribute("time");
-				int time = timeAttribute.as_int();
-				if(0 < time)
-					remainingTime = time;
-				auto gameAttribute = switchNode.attribute("game");
-				SetGameIndex(gameAttribute.as_int());
-				break;
-			}
+			SetError(false);
+			loadStage = LoadStage::AfterGame;
+			throw "XML temp buffer overflow\n";
+		}
+		std::memcpy(tempXMLBuffer + tempXMLBufferSize, e->data, e->numBytes);
+		tempXMLBufferSize += e->numBytes;
 
-			auto preNode = doc.child("pre");
-			if(!preNode.empty())
-			{
-				SetPreGame(1);
-				auto timeAttribute = preNode.attribute("len");
-				int time = timeAttribute.as_int();
-				if(0 < time)
-				{
-					int minutes = time / 60;
-					int seconds = time % 60;
-					SetTimer(minutes, seconds);
-				}
-				loadStage = LoadStage::WaitForStart;
-				break;
-			}
+		int openPos = FindCharacter(tempXMLBuffer, tempXMLBufferSize, '<');
+		if(openPos < 0 || tempXMLBufferSize <= openPos)
+		{
+			SetError(false);
+			loadStage = LoadStage::AfterGame;
+			throw "XML temp buffer invalid open pos\n";
+		}
+		if(openPos != 0)
+		{
+			for(int put=0, get=openPos ; get<tempXMLBufferSize ; ++put, ++get)
+				tempXMLBuffer[put] = tempXMLBuffer[get];
+			tempXMLBufferSize -= openPos;
+		}
 
-			auto endNode = doc.child("end");
-			if(!endNode.empty())
-			{
-				SetTimerTime();
-				stageStartTime = emscripten_performance_now();
-				loadStage = LoadStage::GameEndWait;
-				break;
-			}
-		} while (0);
+		int closePos = FindCharacter(tempXMLBuffer, tempXMLBufferSize, '>');
+		if(0 < closePos || closePos < tempXMLBufferSize)
+		{
+			ParseXMLMessage(reinterpret_cast<char*>(tempXMLBuffer), closePos + 1);
+
+			for(int put=0, get=closePos+1 ; get<tempXMLBufferSize ; ++put, ++get)
+				tempXMLBuffer[put] = tempXMLBuffer[get];
+			tempXMLBufferSize -= closePos+1;
+		}
 	}
 	return false;
 }
 
 bool OnServerClose(int /*eventType*/, const EmscriptenWebSocketCloseEvent *e, void*)
 {
-	SetError();
-	loadStage = LoadStage::AfterGame;
-	throw "Connection has been interupted\n";
+	if(loadStage != LoadStage::AfterGame)
+	{
+		SetError(loadStage != LoadStage::InProgress);
+		loadStage = LoadStage::AfterGame;
+		throw "Connection has been interupted\n";
+	}
+	return false;
 }
 
 bool OnServerError(int /*eventType*/, const EmscriptenWebSocketErrorEvent *e, void*)
 {
-	SetError();
-	loadStage = LoadStage::AfterGame;
-	throw "Could not connect to server\n";
+	if(loadStage != LoadStage::AfterGame)
+	{
+		SetError(loadStage != LoadStage::InProgress);
+		loadStage = LoadStage::AfterGame;
+		throw "Could not connect to server\n";
+	}
+	return false;
 }
 
 void Draw(void)

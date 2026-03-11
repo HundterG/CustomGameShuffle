@@ -1,0 +1,7 @@
+<list>
+	<game type="GBA" command="2in1.gba 2in1_state.bin" />
+	<game type="GBA" command="pacman.gba pacman_state.bin OnFrameSet:33639262=6 AudioMultiplier=1" />
+	<game type="GB" command="ham.gbc ham_state.bin" />
+	<game type="GB" command="pp.gbc pp_state.bin OnFrameSet:54429=1" />
+	<game type="NES" command="SuperMarioBros.nes OnFrameSet:1882=8" />
+</list>
