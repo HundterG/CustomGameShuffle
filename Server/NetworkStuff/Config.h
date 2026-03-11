@@ -1,0 +1,7 @@
+#ifndef NETWORKSTUFFCONFIG_H_
+#define NETWORKSTUFFCONFIG_H_
+
+#define NS_TIMEOUT 2
+#define NS_MAX_UPLOAD_SIZE (4 * 1024 * 1024)
+
+#endif

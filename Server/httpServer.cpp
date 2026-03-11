@@ -1,65 +1,13 @@
-#include <fstream>
+// g++ httpServer.cpp -g -lssl -lcrypto -lcurses -o http.out
 #include <map>
-#include <cstring>
-#include <string>
 
-namespace HSTL
-{
-	typedef uint64_t ID;
-	static_assert(sizeof(ID) == 8, "HSTL ID is not 8 bytes");
-	typedef int64_t WholeNumber;
-	static_assert(sizeof(WholeNumber) == 8, "HSTL WholeNumber is not 8 bytes");
-	ID const defaultID = 37;
+#include "NetworkStuff/HTTPRequestProccess.h"
+#include "NetworkStuff/HTTPServer.h"
+#include "NetworkStuff/RedirectServer.h"
+#include "NetworkStuff/PosixSocket.h"
+#include "NetworkStuff/OpenSSLSocket.h"
 
-	namespace Internal
-	{
-		struct Hasher
-		{
-			ID value = 37;
-
-			template <typename T>
-			void Hash(T *buffer, WholeNumber length)
-			{
-				while (0 < length)
-				{
-					value = (value * 54059) ^ (*buffer * 76963);
-					++buffer;
-					--length;
-				}
-			}
-
-			template <typename T>
-			void HashToNull(T *buffer)
-			{
-				while (*buffer != 0)
-				{
-					value = (value * 54059) ^ (*buffer * 76963);
-					++buffer;
-				}
-			}
-
-			template <typename T>
-			void Add(T v)
-			{
-				value = (value * 54059) ^ (v * 76963);
-			}
-		};
-	}
-
-	inline ID StringHash(char const *string)
-	{
-		Internal::Hasher worker;
-		worker.HashToNull(string);
-		return worker.value;
-	}
-
-	inline ID Hash(char const *buffer, WholeNumber length)
-	{
-		Internal::Hasher worker;
-		worker.Hash(buffer, length);
-		return worker.value;
-	}
-}
+#include "serverCommon.inl"
 
 struct LoadedFile
 {
@@ -70,86 +18,143 @@ struct LoadedFile
 	int OptionalCacheTime = 0;
 };
 
-#define IXWEBSOCKET_USE_TLS
-#define IXWEBSOCKET_USE_OPEN_SSL
-#define HTTP_PRINT_STUFF
-#include "ixwebsocket/IXCancellationRequest.cpp"
-#include "ixwebsocket/IXConnectionState.cpp"
-#include "ixwebsocket/IXDNSLookup.cpp"
-#include "ixwebsocket/IXExponentialBackoff.cpp"
-#include "ixwebsocket/IXHttp.cpp"
-#include "ixwebsocket/IXHttpServer.cpp"
-#include "ixwebsocket/IXNetSystem.cpp"
-#include "ixwebsocket/IXSelectInterrupt.cpp"
-#include "ixwebsocket/IXSelectInterruptEvent.cpp"
-#include "ixwebsocket/IXSelectInterruptFactory.cpp"
-#include "ixwebsocket/IXSelectInterruptPipe.cpp"
-#include "ixwebsocket/IXSetThreadName.cpp"
-#include "ixwebsocket/IXSocket.cpp"
-#include "ixwebsocket/IXSocketConnect.cpp"
-#include "ixwebsocket/IXSocketFactory.cpp"
-#include "ixwebsocket/IXSocketOpenSSL.cpp"
-#include "ixwebsocket/IXSocketServer.cpp"
-#include "ixwebsocket/IXSocketTLSOptions.cpp"
-#include "ixwebsocket/IXStrCaseCompare.cpp"
-#include "ixwebsocket/IXUrlParser.cpp"
-#include "ixwebsocket/IXUserAgent.cpp"
-#include "ixwebsocket/IXUuid.cpp"
-#include "ixwebsocket/IXWebSocketHttpHeaders.cpp"
-
-#include "xml/pugixml.cpp"
-
-#include "cli/cmdparser.hpp"
-
 std::map<HSTL::ID, LoadedFile> files;
 HSTL::ID defaultFile = HSTL::defaultID;
+ServerUI ui;
+std::string certFile;
+std::string keyFile;
 
-ix::HttpResponsePtr GetFile(ix::HttpRequestPtr request, std::shared_ptr<ix::ConnectionState> state)
+class HTTPServerProccess : public HTTPRequestProccess
 {
-	std::cout << request->method << " : " << request->uri << "\n";
-	if(request->method != "GET")
-		return std::make_shared<ix::HttpResponse>(403, "FORBIDDEN", ix::HttpErrorCode::Ok, ix::WebSocketHttpHeaders(), "403", 4);
-
-	if(!files.empty())
+public:
+	void DoRequest(SocketBase *socket)
 	{
-		char const *url = request->uri.c_str();
-		HSTL::WholeNumber size = request->uri.size();
-		if(url[0] == '/' || url[0] == '\\')
-		{
-			++url;
-			--size;
-		}
-
-		HSTL::ID id = HSTL::defaultID;
-		if(size <= 0)
-			id = defaultFile;
-		else
-			id = HSTL::Hash(url, size);
-
-		auto file = files.find(id);
-		if(file != files.end())
-		{
-			ix::WebSocketHttpHeaders headers;
-			headers.emplace("Content-Type", file->second.mime);
-			headers.emplace("Cross-Origin-Opener-Policy", "same-origin");
-			headers.emplace("Cross-Origin-Embedder-Policy", "credentialless");
-			if(file->second.Cache)
+		auto fileIt = files.end();
+		bool isDefault = false;
+		ParseHelper(socket, 
+			[&](char const *requestCode, char const *HTTPVersion, char const *uri)
 			{
-				if(0 <= file->second.OptionalCacheTime)
-					headers.emplace("Cache-Control", "max-age=" + std::to_string(file->second.OptionalCacheTime));
-			}
-			else
-				headers.emplace("Cache-Control", "no-store");
-			if(id == defaultFile)
-				headers.emplace("Content-Security-Policy", "worker-src 'self' blob: 'wasm-unsafe-eval';");
-			return std::make_shared<ix::HttpResponse>(200, "OK", ix::HttpErrorCode::Ok, headers, file->second.data, file->second.size);
-		}
-		else
-			return std::make_shared<ix::HttpResponse>(404, "NOT FOUND", ix::HttpErrorCode::Ok, ix::WebSocketHttpHeaders(), "404", 4);
+				if(std::strcmp(requestCode, "GET") != 0)
+					return HelperFunctionReturn::FORBIDDEN;
+				
+				if(uri[0] == '/' || uri[0] == '\\')
+					++uri;
+
+				HSTL::ID fileID = HSTL::defaultID;
+				if(uri[0] == 0)
+				{
+					fileID = defaultFile;
+					isDefault = true;
+				}
+				else
+					fileID = HSTL::StringHash(uri);
+
+				char logString[1024 + 128] = {0};
+				fileIt = files.find(fileID);
+				if(fileIt != files.end())
+				{
+					snprintf(logString, sizeof(logString), "/%s (OK)", uri);
+					ui.AddToLog(logString);
+					return HelperFunctionReturn::OK;
+				}
+				else
+				{
+					snprintf(logString, sizeof(logString), "/%s (NOT FOUND)", uri);
+					ui.AddToLog(logString);
+					return HelperFunctionReturn::NOT_FOUND;
+				}
+			}, 
+			[](char const *headerKey, char const *headerValue)
+			{
+				if(std::strcmp(headerKey, "content-length") == 0)
+					return HelperFunctionReturn::FORBIDDEN;
+				return HelperFunctionReturn::OK;
+			}, 
+			[](unsigned char const *buffer, unsigned int bufferSize, uint64_t totalSize){ return HelperFunctionReturn::FORBIDDEN; }, 
+			[&](SocketBase *socket, char const *requestCode, char const *uri)
+			{
+				std::pair<char const*, char const*> headers[6];
+				headers[0].first = "Content-Type"; headers[0].second = fileIt->second.mime.c_str(); 
+				headers[1].first = "Cross-Origin-Opener-Policy"; headers[1].second = "same-origin"; 
+				headers[2].first = "Cross-Origin-Embedder-Policy"; headers[2].second = "credentialless"; 
+				headers[3].first = "X-Robots-Tag"; headers[3].second = "noindex, nofollow";
+				int headersSize = 4;
+
+				char cacheTimeString[256] = {0};
+				if(fileIt->second.Cache == false)
+				{
+					headers[headersSize].first = "Cache-Control"; headers[headersSize].second = "no-store";
+					++headersSize;
+				}
+				else if(0 <= fileIt->second.OptionalCacheTime)
+				{
+					sprintf(cacheTimeString, "max-age=%d", fileIt->second.OptionalCacheTime);
+					headers[headersSize].first = "Cache-Control"; headers[headersSize].second = cacheTimeString;
+					++headersSize;
+				}
+
+				if(isDefault)
+				{
+					headers[headersSize].first = "Content-Security-Policy"; headers[headersSize].second = "worker-src 'self' blob: 'wasm-unsafe-eval';";
+					++headersSize;
+				}
+
+				WriteResponse(socket, "200 OK", headers, headersSize, fileIt->second.data, fileIt->second.size);
+				return HelperFunctionReturn::OK;
+			});
 	}
-	else
-		return std::make_shared<ix::HttpResponse>(404, "NOT FOUND", ix::HttpErrorCode::Ok, ix::WebSocketHttpHeaders(), "404", 4);
-}
+};
+
+class HTTPServerUIFunctions : public ServerUIFunctions
+{
+public:
+	void GetRightStatsLine1(char line[128]) {}
+	void GetRightStatsLine2(char line[128]) {}
+
+	int GetMaxInputTemplates(void)
+	{
+		return 2;
+	}
+	void GetInputTemplate(int index, char line[128])
+	{
+		switch(index)
+		{
+		case 0:
+			std::strcpy(line, "Quit");
+			break;
+
+		case 1:
+			std::strcpy(line, "Tail");
+			break;
+
+		default:
+			line[0] = 0;
+		}
+	}
+	void ProcessInput(char line[128])
+	{
+		for(int i=0 ; i<128 ; ++i)
+			line[i] = char(std::tolower(line[i]));
+		if(std::strcmp(line, "quit") == 0)
+			ui.StopRunning();
+		else if(std::strcmp(line, "tail") == 0)
+			ui.GoToBottomOfLog();
+	}
+} HTTPUIFunctions;
+
+class HTTPServerSSLListener : public OpenSSLListener
+{
+public:
+	char const *GetCertFileName(void)
+	{
+		return certFile.c_str();
+	}
+	
+	char const *GetKeyFileName(void)
+	{
+		return keyFile.c_str();
+	}
+};
 
 int main(int argc, char *args[])
 {
@@ -254,38 +259,25 @@ int main(int argc, char *args[])
 		}
 	}
 
-	ix::initNetSystem();
+	certFile = std::move(argGetter.get<std::string>("q"));
+	keyFile = std::move(argGetter.get<std::string>("k"));
 
-	ix::HttpServer serverMain(argGetter.get<int>("p"), "0.0.0.0", 20, 128);
-	serverMain.setOnConnectionCallback(GetFile);
-	ix::SocketTLSOptions secure;
-	secure.certFile = argGetter.get<std::string>("q");
-	secure.keyFile = argGetter.get<std::string>("k");
-	secure.tls = true;
-	secure.caFile = "NONE";
-	serverMain.setTLSOptions(secure);
-	if(serverMain.listen().first == false)
+	HTTPServer<HTTPServerProccess, HTTPServerSSLListener, 64> serverMain;
+	if(serverMain.RunAsync(argGetter.get<int>("p")) == false)
 	{
 		std::cout << "Failed to listen main server\n";
 		return 1;
 	}
-	
-	serverMain.start();
 
+	RedirectServer<PosixListener> serverRedirect;
 	if(0 < argGetter.get<int>("r") && !argGetter.get<std::string>("l").empty())
 	{
-		ix::HttpServer serverRedirect(argGetter.get<int>("r"), "0.0.0.0");
-		serverRedirect.makeRedirectServer(argGetter.get<std::string>("l"));
-		if(serverRedirect.listen().first == false)
+		if(serverRedirect.RunAsync(argGetter.get<int>("r"), argGetter.get<std::string>("l").c_str()) == false)
 		{
 			std::cout << "Failed to listen redirect server\n";
 			return 1;
 		}
-		serverRedirect.start();
-		for(;;)
-			sleep(60);
 	}
-	else
-		for(;;)
-			sleep(60);
+
+	ui.Run(HTTPUIFunctions);
 }
