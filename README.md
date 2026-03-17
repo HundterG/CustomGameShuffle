@@ -10,11 +10,9 @@ A game shuffle is an event where players go through a set of games in a random o
 
 
 ## TODO for 1.0
-* Harden/sanitize xml parsing between client and server
 * Proper NES initial state saving/loading
 * NES MME3 support
 * Leaderboards
-* Fancy server interface with ncurses
 * Debug tools for aiding initial state creation
 * Debug tools for aiding cheat code creation
 

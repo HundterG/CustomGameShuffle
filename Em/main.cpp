@@ -167,8 +167,6 @@ namespace
 	std::vector<GameBase*> Games;
 	// A B L R Left Right Up Down
 	bool buttons[8] = {false, false, false, false, false, false, false, false};
-	unsigned char tempXMLBuffer[1024 + 4];
-	int tempXMLBufferSize = 0;
 
 #if defined(CGS_DEBUG_COMMANDS)
 	bool debugEnableStep = false;
@@ -554,121 +552,75 @@ bool OnServerOpen(int /*eventType*/, const EmscriptenWebSocketOpenEvent *e, void
 	return false;
 }
 
-void ParseXMLMessage(char const *msg, int size)
-{
-	WriteLogBuffer(msg, size, true);
-
-	try
-	{
-		pugi::xml_document doc;
-		pugi::xml_parse_result result = doc.load_buffer(msg, size);
-		if(!result)
-			return;
-			
-		auto switchNode = doc.child("swi");
-		if(!switchNode.empty())
-		{
-			if(loadStage != LoadStage::InProgress)
-			{
-				WriteLog("Starting Shuffle\n");
-				loadStage = LoadStage::InProgress;
-				emulatorTickThread = emscripten_malloc_wasm_worker(1024 * 1024); // 1MB
-				WriteLog("Thread: %i\n", int(emulatorTickThread));
-				if(emulatorTickThread == 0)
-				{
-					SetError(false);
-					loadStage = LoadStage::AfterGame;
-					throw "Tick thread was not started\n";
-				}
-				emscripten_wasm_worker_post_function_v(emulatorTickThread, Tick);
-			}
-			SetPreGame(0);
-			stageStartTime = emscripten_performance_now();
-			auto timeAttribute = switchNode.attribute("time");
-			int time = timeAttribute.as_int();
-			if(0 < time)
-				remainingTime = time;
-			auto gameAttribute = switchNode.attribute("game");
-			SetGameIndex(gameAttribute.as_int());
-			return;
-		}
-
-		auto preNode = doc.child("pre");
-		if(!preNode.empty())
-		{
-			SetPreGame(1);
-			auto timeAttribute = preNode.attribute("len");
-			int time = timeAttribute.as_int();
-			if(0 < time)
-			{
-				int minutes = time / 60;
-				int seconds = time % 60;
-				SetTimer(minutes, seconds);
-			}
-			loadStage = LoadStage::WaitForStart;
-			return;
-		}
-
-		auto endNode = doc.child("end");
-		if(!endNode.empty())
-		{
-			SetTimerTime();
-			stageStartTime = emscripten_performance_now();
-			loadStage = LoadStage::GameEndWait;
-			return;
-		}
-	}
-	catch(...)
-	{
-		WriteLog("Error processing tag\n");
-	}
-}
-
-int FindCharacter(unsigned char const *string, int length, unsigned char c)
-{
-	for(int i=0 ; i<length ; ++i)
-	{
-		if(string[i] == c)
-			return i;
-	}
-	return INT_MIN;
-}
-
 bool OnServerMessage(int /*eventType*/, const EmscriptenWebSocketMessageEvent *e, void*)
 {
 	if(e->data && 0 < e->numBytes)
 	{
-		if(1024 < tempXMLBufferSize + e->numBytes)
-		{
-			SetError(false);
-			loadStage = LoadStage::AfterGame;
-			throw "XML temp buffer overflow\n";
-		}
-		std::memcpy(tempXMLBuffer + tempXMLBufferSize, e->data, e->numBytes);
-		tempXMLBufferSize += e->numBytes;
+		WriteLogBuffer(reinterpret_cast<const char*>(e->data), e->numBytes, true);
 
-		int openPos = FindCharacter(tempXMLBuffer, tempXMLBufferSize, '<');
-		if(openPos < 0 || tempXMLBufferSize <= openPos)
+		try
 		{
-			SetError(false);
-			loadStage = LoadStage::AfterGame;
-			throw "XML temp buffer invalid open pos\n";
-		}
-		if(openPos != 0)
-		{
-			for(int put=0, get=openPos ; get<tempXMLBufferSize ; ++put, ++get)
-				tempXMLBuffer[put] = tempXMLBuffer[get];
-			tempXMLBufferSize -= openPos;
-		}
+			pugi::xml_document doc;
+			pugi::xml_parse_result result = doc.load_buffer(e->data, e->numBytes);
+			if(!result)
+				return false;
+			
+			auto switchNode = doc.child("swi");
+			if(!switchNode.empty())
+			{
+				if(loadStage != LoadStage::InProgress)
+				{
+					WriteLog("Starting Shuffle\n");
+					loadStage = LoadStage::InProgress;
+					emulatorTickThread = emscripten_malloc_wasm_worker(1024 * 1024); // 1MB
+					WriteLog("Thread: %i\n", int(emulatorTickThread));
+					if(emulatorTickThread == 0)
+					{
+						SetError(false);
+						loadStage = LoadStage::AfterGame;
+						throw "Tick thread was not started\n";
+					}
+					emscripten_wasm_worker_post_function_v(emulatorTickThread, Tick);
+				}
+				SetPreGame(0);
+				stageStartTime = emscripten_performance_now();
+				auto timeAttribute = switchNode.attribute("time");
+				int time = timeAttribute.as_int();
+				if(0 < time)
+					remainingTime = time;
+				auto gameAttribute = switchNode.attribute("game");
+				SetGameIndex(gameAttribute.as_int());
+				return false;
+			}
 
-		int closePos = FindCharacter(tempXMLBuffer, tempXMLBufferSize, '>');
-		if(0 < closePos || closePos < tempXMLBufferSize)
-		{
-			ParseXMLMessage(reinterpret_cast<char*>(tempXMLBuffer), closePos + 1);
+			auto preNode = doc.child("pre");
+			if(!preNode.empty())
+			{
+				SetPreGame(1);
+				auto timeAttribute = preNode.attribute("len");
+				int time = timeAttribute.as_int();
+				if(0 < time)
+				{
+					int minutes = time / 60;
+					int seconds = time % 60;
+					SetTimer(minutes, seconds);
+				}
+				loadStage = LoadStage::WaitForStart;
+				return false;
+			}
 
-			for(int put=0, get=closePos+1 ; get<tempXMLBufferSize ; ++put, ++get)
-				tempXMLBuffer[put] = tempXMLBuffer[get];
-			tempXMLBufferSize -= closePos+1;
+			auto endNode = doc.child("end");
+			if(!endNode.empty())
+			{
+				SetTimerTime();
+				stageStartTime = emscripten_performance_now();
+				loadStage = LoadStage::GameEndWait;
+				return false;
+			}
+		}
+		catch(...)
+		{
+			WriteLog("Error processing tag\n");
 		}
 	}
 	return false;
