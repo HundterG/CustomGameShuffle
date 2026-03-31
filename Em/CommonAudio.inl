@@ -1,5 +1,10 @@
 #define SOUNDQUEUESAMPLESIZE (3 * 1024)
 
+namespace Sound
+{
+	float volume = 1.0f;
+}
+
 class SoundQueue_Mono
 {
 	emscripten_lock_t lock = EMSCRIPTEN_LOCK_T_STATIC_INITIALIZER;
@@ -17,7 +22,7 @@ public:
 
 	void GetBuffer(float outSamples[], int samplesToGet)
 	{
-		// Some browsers do not allow async in the audio thread
+		float volumeThisChunk = (1.0f / 32768.0f) * emscripten_atomic_load_f32(&Sound::volume);
 		emscripten_lock_busyspin_waitinf_acquire(&lock);
 		bool underflowDetected = false;
 
@@ -25,7 +30,7 @@ public:
 		{
 			if(start == end)
 			{
-				outSamples[i] = last / 32768.0f;
+				outSamples[i] = last * volumeThisChunk;
 				underflowDetected = true;
 			}
 			else
@@ -34,7 +39,7 @@ public:
 				++start;
 				if(SOUNDQUEUESAMPLESIZE <= start)
 					start = 0;
-				outSamples[i] = last / 32768.0f;
+				outSamples[i] = last * volumeThisChunk;
 			}
 		}
 
@@ -49,7 +54,7 @@ public:
 
 	void QueueBuffer(int16_t inSamples[], int sampleCount)
 	{
-		emscripten_lock_waitinf_acquire(&lock);
+		emscripten_lock_busyspin_waitinf_acquire(&lock);
 		underflowSinceLastQueue = false;
 
 		if(0 < overflowSize)

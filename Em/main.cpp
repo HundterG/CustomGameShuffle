@@ -18,7 +18,7 @@
 
 #define SERVER_LOCATION "wss://localhost:8085/"
 
-// /home/dev/Desktop/emscript/emsdk/upstream/emscripten/emcc main.cpp -o ../Client/main.html -sEXPORTED_FUNCTIONS=_ResizeCall,_main,_DoInput,_DebugSetGame,_DebugSave,_DebugEnableStep,_DebugDoStep,_DebugStart -sEXPORTED_RUNTIME_METHODS=[HEAPU8] --embed-file files@/ -sAUDIO_WORKLET=1 -sWASM_WORKERS=1 -sNO_DISABLE_EXCEPTION_CATCHING=1 -s TOTAL_MEMORY=268435456 -lwebsocket.js
+// /home/dev/Desktop/emscript/emsdk/upstream/emscripten/emcc main.cpp -o ../Client/main.html -sEXPORTED_FUNCTIONS=_ResizeCall,_main,_DoInput,_DebugSetGame,_DebugSave,_DebugEnableStep,_DebugDoStep,_DebugStart,_ShowTimer,_ShowInGameSettingsMenu,_SetVolume -sEXPORTED_RUNTIME_METHODS=[HEAPU8] --embed-file files@/ -sAUDIO_WORKLET=1 -sWASM_WORKERS=1 -sNO_DISABLE_EXCEPTION_CATCHING=1 -s TOTAL_MEMORY=268435456 -lwebsocket.js
 
 #if defined(CGS_DEBUG_COMMANDS)
 // Maybe someday ill include the full thing
@@ -104,40 +104,50 @@ EM_JS(void, SetError, (int setup), {
 
 EM_JS(void, SetTimer, (int min, float sec), {
 	var timerElement = document.querySelector('.timer');
-	if(min <= 0)
+	if(timerElement != null)
 	{
-		if(sec < 1)
+		if(min <= 0)
 		{
-			timerElement.innerHTML = "1";
+			if(sec < 2)
+			{
+				timerElement.innerHTML = "1";
+				return;
+			}
+			if(sec < 3)
+			{
+				timerElement.innerHTML = "2";
+				return;
+			}
+			if(sec < 4)
+			{
+				timerElement.innerHTML = "3";
+				return;
+			}
+			if(sec < 5)
+			{
+				timerElement.innerHTML = "4";
+				return;
+			}
+			if(sec < 6)
+			{
+				timerElement.innerHTML = "5";
+				return;
+			}
+			timerElement.innerHTML = sec.toFixed(2).padStart(5, '0');
 			return;
 		}
-		if(sec < 2)
-		{
-			timerElement.innerHTML = "2";
-			return;
-		}
-		if(sec < 3)
-		{
-			timerElement.innerHTML = "3";
-			return;
-		}
-		if(sec < 4)
-		{
-			timerElement.innerHTML = "4";
-			return;
-		}
-		if(sec < 5)
-		{
-			timerElement.innerHTML = "5";
-			return;
-		}
+		timerElement.innerHTML = min + ":" + sec.toFixed(0).padStart(2, '0');
 	}
-	timerElement.innerHTML = min + ":" + sec.toFixed(2).padStart(5, '0');
 });
 
 EM_JS(void, SetTimerTime, (), {
-	var timerElement = document.querySelector('.timer');
-	timerElement.innerHTML = "Time's Out";
+	var box = document.querySelector('.box');
+	box.innerHTML = "<div class='timer'>Time's Out</div>";
+});
+
+EM_JS(void, SetInGameMenu_Internal, (int volume), {
+	var box = document.querySelector('.box');
+	box.innerHTML = '<div class="inGameSettingsMenu" onmouseleave="_ShowTimer()">Volume:<br><input type="range" oninput="_SetVolume(event.target.value)" min="0" max="100" value="' + volume + '"></div>';
 });
 
 EM_JS(void, SetPreGame, (int show), {
@@ -167,6 +177,11 @@ namespace
 	std::vector<GameBase*> Games;
 	// A B L R Left Right Up Down
 	bool buttons[8] = {false, false, false, false, false, false, false, false};
+
+	double lastIdleTime = 0;
+	double tickTime = 0;
+	double debugTickTime = 0;
+	int debugTickCount = 0;
 
 #if defined(CGS_DEBUG_COMMANDS)
 	bool debugEnableStep = false;
@@ -201,7 +216,6 @@ namespace
 	// Needs to be manually set in previous state
 	double stageStartTime = 0;
 	int remainingTime = 0;
-	emscripten_wasm_worker_t emulatorTickThread;
 	EMSCRIPTEN_WEBSOCKET_T serverConnection = 0;
 }
 
@@ -230,6 +244,31 @@ extern "C"
 			Games[currentIndex]->OnSwapOn();
 			emscripten_lock_release(&currentIndexLock);
 		}
+	}
+
+	void ShowTimer(void)
+	{
+		EM_ASM( var box = document.querySelector('.box'); box.innerHTML = '<div class="timer">--:--.--</div> <img src="timer_menu_button.png" class="timerSettingsButton" onclick="_ShowInGameSettingsMenu()">'; );
+		if(0 < remainingTime)
+		{
+			int minutes = remainingTime / 60;
+			int seconds = remainingTime % 60;
+			SetTimer(minutes, seconds);
+		}
+	}
+
+	void ShowInGameSettingsMenu(void)
+	{
+		int volume = emscripten_atomic_load_f32(&Sound::volume) * 100;
+		SetInGameMenu_Internal(volume);
+	}
+
+	void SetVolume(int volume)
+	{
+		if(volume < 0) volume = 0;
+		if(100 < volume) volume = 100;
+		float volumeFloat = volume / 100.0f;
+		emscripten_atomic_store_f32(&Sound::volume, volumeFloat);
 	}
 
 	void DebugSetGame(int game)
@@ -431,6 +470,54 @@ void Idle(void)
 		break;
 
 	case LoadStage::InProgress:
+		{
+			double t = emscripten_performance_now();
+			double dt = t - lastIdleTime;
+			tickTime += dt;
+			debugTickTime += dt;
+			int framesThisIdle = 0;
+			while((1000.0/60.0) < tickTime && framesThisIdle < 4)
+			{
+				int gameIndex = GetGameIndex();
+				Games[gameIndex]->SetControllerState(buttons[0], buttons[1], buttons[2], buttons[3], buttons[6], buttons[7], buttons[4], buttons[5]);
+#if defined(CGS_DEBUG_COMMANDS)
+				if(0 < debugDoStart)
+				{
+					Games[gameIndex]->SetStartThisFrame();
+					--debugDoStart;
+				}
+				if(debugDoSave)
+				{
+					Games[gameIndex]->SaveState();
+					debugDoSave = false;
+				}
+				if(debugEnableStep)
+				{
+					if(debugDoStep)
+					{
+						Games[gameIndex]->Tick();
+						debugDoStep = false;
+					}
+				}
+				else
+					Games[gameIndex]->Tick();
+#else
+				Games[gameIndex]->Tick();
+#endif
+				tickTime -= (1000.0/60.0);
+				++debugTickCount;
+			}
+
+			if(1000 < debugTickTime)
+			{
+				WriteLog("FPS: %d - In: %f\n", debugTickCount, float(debugTickTime));
+				debugTickCount = 0;
+				debugTickTime -= 1000;
+			}
+
+			lastIdleTime = t;
+		}
+
 		glutPostRedisplay();
 #if defined(CGS_DEBUG_COMMANDS)
 		emscripten_lock_waitinf_acquire(&debugDownloadLock);
@@ -473,75 +560,6 @@ void Idle(void)
 	}
 }
 
-void Tick(void)
-{
-	double lastTime = -1.0;
-	double overTime = 0.0;
-	int debugFrames = 0;
-	int debugTicks = 0;
-	double debugLastTime = 0;
-
-	WriteLog("Entering Tick\n");
-
-	while(loadStage == LoadStage::InProgress)
-	{
-		double t = emscripten_performance_now();
-		++debugTicks;
-		if(lastTime < 0)
-		{
-			lastTime = t;
-			debugLastTime = t;
-			continue;
-		}
-
-		double dt = t - lastTime;
-		if((1000.0/60.0) - overTime < dt)
-		{
-			int gameIndex = GetGameIndex();
-			Games[gameIndex]->SetControllerState(buttons[0], buttons[1], buttons[2], buttons[3], buttons[6], buttons[7], buttons[4], buttons[5]);
-#if defined(CGS_DEBUG_COMMANDS)
-			if(0 < debugDoStart)
-			{
-				Games[gameIndex]->SetStartThisFrame();
-				--debugDoStart;
-			}
-			if(debugDoSave)
-			{
-				Games[gameIndex]->SaveState();
-				debugDoSave = false;
-			}
-			if(debugEnableStep)
-			{
-				if(debugDoStep)
-				{
-					Games[gameIndex]->Tick();
-					debugDoStep = false;
-				}
-			}
-			else
-				Games[gameIndex]->Tick();
-#else
-			Games[gameIndex]->Tick();
-#endif
-			lastTime = t;
-			overTime = dt - (1000.0/60.0);
-			++debugFrames;
-		}
-		else
-			emscripten_wasm_worker_sleep(100000); // 1/10 ms
-
-		if(debugLastTime + 1000 <= t)
-		{
-			WriteLog("FPS: %d - Ticks: %d\n", debugFrames, debugTicks);
-			debugFrames = 0;
-			debugTicks = 0;
-			debugLastTime = t;
-		}
-	}
-
-	WriteLog("Exiting Tick\n");
-}
-
 bool OnServerOpen(int /*eventType*/, const EmscriptenWebSocketOpenEvent *e, void*)
 {
 	SetProgress(100);
@@ -571,23 +589,16 @@ bool OnServerMessage(int /*eventType*/, const EmscriptenWebSocketMessageEvent *e
 				if(loadStage != LoadStage::InProgress)
 				{
 					WriteLog("Starting Shuffle\n");
+					SetPreGame(0);
+					stageStartTime = lastIdleTime = emscripten_performance_now();
 					loadStage = LoadStage::InProgress;
-					emulatorTickThread = emscripten_malloc_wasm_worker(1024 * 1024); // 1MB
-					WriteLog("Thread: %i\n", int(emulatorTickThread));
-					if(emulatorTickThread == 0)
-					{
-						SetError(false);
-						loadStage = LoadStage::AfterGame;
-						throw "Tick thread was not started\n";
-					}
-					emscripten_wasm_worker_post_function_v(emulatorTickThread, Tick);
 				}
-				SetPreGame(0);
-				stageStartTime = emscripten_performance_now();
+
 				auto timeAttribute = switchNode.attribute("time");
 				int time = timeAttribute.as_int();
 				if(0 < time)
 					remainingTime = time;
+
 				auto gameAttribute = switchNode.attribute("game");
 				SetGameIndex(gameAttribute.as_int());
 				return false;
@@ -598,11 +609,11 @@ bool OnServerMessage(int /*eventType*/, const EmscriptenWebSocketMessageEvent *e
 			{
 				SetPreGame(1);
 				auto timeAttribute = preNode.attribute("len");
-				int time = timeAttribute.as_int();
-				if(0 < time)
+				remainingTime = timeAttribute.as_int();
+				if(0 < remainingTime)
 				{
-					int minutes = time / 60;
-					int seconds = time % 60;
+					int minutes = remainingTime / 60;
+					int seconds = remainingTime % 60;
 					SetTimer(minutes, seconds);
 				}
 				loadStage = LoadStage::WaitForStart;

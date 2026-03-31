@@ -71,6 +71,22 @@
 	font-size: 42px;
 }
 
+.timerSettingsButton
+{
+	position: fixed;
+	margin-left: 280px;
+	top: 27px;
+}
+
+.inGameSettingsMenu
+{
+	text-align: left;
+	color: white;
+	font-size: 16px;
+	overflow-y: auto;
+	overflow-x: hidden;
+}
+
 .centerDIV
 {
 	margin: 0 auto;

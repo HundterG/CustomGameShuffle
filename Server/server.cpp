@@ -313,10 +313,14 @@ public:
 	void GetRightStatsLine2(char line[128])
 	{
 		int numberOfConnections = 0;
+#if USE_NS_WEBSOCKETSERVER == 1
 		{
 			std::lock_guard<std::mutex> lock(openConnectionsLock);
 			numberOfConnections = int(openConnections.size());
 		}
+#else
+		numberOfConnections = int(server->getConnectedClientsCount());
+#endif
 		std::snprintf(line, 128, "Player Count: %d", numberOfConnections);
 	}
 

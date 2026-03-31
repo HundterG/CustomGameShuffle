@@ -126,23 +126,6 @@ function Step3()
 	if(!webGLEnabled)
 		errors.push('The Classic Game Shuffle requires WebGL and it was not detected on your browser. Please make sure you can run WebGL.');
 
-	try
-	{
-		var AudioContext = window.AudioContext || window.webkitAudioContext;
-		var ctx = new AudioContext();
-		if(!(ctx.sampleRate == 44100 || ctx.sampleRate == 48000))
-			warnings.push('Unsupported Audio Driver. The sound will be disabled.');
-		ctx.close();
-	}
-	catch(e)
-	{
-		warnings.push('Unsupported Audio Driver. The sound will be disabled.');
-	}
-
-	var _emscripten_has_threading_support = () => typeof SharedArrayBuffer !== 'undefined';
-	if(!_emscripten_has_threading_support())
-		errors.push('The Classic Game Shuffle requires SharedArrayBuffer and it was not detected on your browser. Please make sure you can run SharedArrayBuffer.');
-
 	if(errors.length == 0)
 	{
 		if(warnings.length == 0)
@@ -518,7 +501,8 @@ function OnDownloadEnd()
 	var box = document.querySelector('.box');
 	box.style.width = '300px';
 	box.style.background = 'black';
-	box.innerHTML = '<div class="timer">--:--.--</div>';
+	_ShowTimer();
+
 	var foot = document.querySelector('.footer');
 	foot.style.display = 'none';
 	setTimeout(ShowGameBox, 100);
