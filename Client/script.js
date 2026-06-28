@@ -188,6 +188,7 @@ var GlobalSetting_Left = "ArrowLeft";
 var GlobalSetting_Right = "ArrowRight";
 var GlobalSetting_Up = "ArrowUp";
 var GlobalSetting_Down = "ArrowDown";
+var GlobalSetting_MuscleMemory = false;
 
 var GlobalTransientKBRebindIndex = 0;
 var GlobalTransientControllerValid = false;
@@ -369,7 +370,8 @@ function SelectController()
 	{
 		GlobalTransientCheckControllerLoop = false;
 		GlobalSetting_UseGamepad = true;
-		StartDownload();
+		var box = document.querySelector('.box');
+		box.innerHTML = "Would you like to turn on Muscle Memory Mode?<br><br>Muscle Memory Mode swaps the A and B buttons on the controller to match the orientation of the buttons on their original consoles.<br><br><div class='centerDIV'><button class='button' onclick='GlobalSetting_MuscleMemory = true; StartDownload()'>Yes</button> <button class='button' onclick='GlobalSetting_MuscleMemory = false; StartDownload()'>No</button> <button class='button' onclick='ShowGlobalSettings()'>Cancel</button></div>"
 	}
 }
 

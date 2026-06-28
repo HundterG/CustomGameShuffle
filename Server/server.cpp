@@ -9,9 +9,10 @@
 #include <atomic>
 #include <vector>
 #include <map>
+#include <csignal>
 
 // Use the old one till the new one is ready
-#define USE_NS_WEBSOCKETSERVER 0
+#define USE_NS_WEBSOCKETSERVER 1
 
 #if USE_NS_WEBSOCKETSERVER == 1
 #include "NetworkStuff/OpenSSLSocket.h"
@@ -71,9 +72,12 @@ struct ShuffleEntry
 
 struct OpenConnection
 {
-	OpenConnection(HSTL::ID userAgentID) : LeaderboardID(userAgentID) {}
+	OpenConnection(HSTL::ID userAgentID) : LeaderboardID(userAgentID), isInUse(ATOMIC_VAR_INIT(false)), tempXMLBufferSize(0) { for(int i=0 ; i<128 * 1024 ; ++i) tempXMLBuffer[i] = 0; }
 	HSTL::ID LeaderboardID;
-	std::atomic_bool isInUse = ATOMIC_VAR_INIT(false);
+	std::atomic_bool isInUse;
+
+	unsigned char tempXMLBuffer[128 * 1024];
+	int tempXMLBufferSize;
 
 	std::string GetName(void)
 	{
@@ -127,28 +131,41 @@ void ParseXMLMessage(OpenConnection &connection, char const *msg, int size)
 	}
 }
 
+int FindCharacter(unsigned char buffer[], int bufferSize, unsigned char c)
+{
+	for(int i=0 ; i<bufferSize ; ++i)
+	{
+		if(buffer[i] == c)
+			return i;
+	}
+	return -1;
+}
+
 class CGSServerWebSocketFunctions : public WebSocketFunctions
 {
 public:
 	void OnNewConnection(WebSocketServerBase *server, SocketBase *socket, char const *userAgent)
 	{
+		std::string initalStateData;
 		switch(runState)
 		{
 		case RunState::PreGame:
-			socket->WriteString(("<pre len=\"" + std::to_string(totalLength) + "\" />").c_str());
+			initalStateData = "<pre len=\"" + std::to_string(totalLength) + "\" />";
 			break;
 		case RunState::InGame:
 		{
 			int64_t allProgress = std::time(nullptr) - startTime;
 			int64_t remainingTime = totalLength - allProgress;
 			int index = (currentShuffle < 0) ? 0 : currentShuffle;
-			socket->WriteString(("<swi game=\"" + std::to_string(shuffles[index].index) + "\" time=\"" + std::to_string(remainingTime) + "\" />").c_str());
+			initalStateData = "<swi game=\"" + std::to_string(shuffles[index].index) + "\" time=\"" + std::to_string(remainingTime) + "\" />";
 		}
 			break;
 		case RunState::PostGame:
-			socket->WriteString("<end />");
+			initalStateData = "<end />";
 			break;
 		}
+
+		server->SendDataToClient(socket, initalStateData.c_str(), initalStateData.size());
 
 		std::string name;
 		{
@@ -159,7 +176,7 @@ public:
 
 		ui.AddToLog(("Accepting new Connection (" + name + ")").c_str());
 	}
-	void OnDataReceived(WebSocketServerBase *server, SocketBase *socket)
+	void OnDataReceived(WebSocketServerBase *server, SocketBase *socket, unsigned char const *buffer, unsigned int bufferSize, unsigned int totalSize)
 	{
 		OpenConnection *connection = nullptr;
 		{
@@ -171,42 +188,36 @@ public:
 
 		if(connection)
 		{
-			unsigned int bufferSize = 0;
-			do
+			std::memcpy(connection->tempXMLBuffer + connection->tempXMLBufferSize, buffer, bufferSize);
+			connection->tempXMLBufferSize += int(bufferSize);
+
+			if(0 < connection->tempXMLBufferSize)
 			{
-				unsigned char getBuffer[512] = {0};
-				bufferSize = socket->ReadSomeData(getBuffer, 512);
-				std::memcpy(connection->tempXMLBuffer + connection->tempXMLBufferSize, getBuffer, bufferSize);
-				connection->tempXMLBufferSize += int(bufferSize);
-
-				if(0 < connection->tempXMLBufferSize)
+				int openPos = FindCharacter(connection->tempXMLBuffer, connection->tempXMLBufferSize, '<');
+				if(openPos < 0 || connection->tempXMLBufferSize <= openPos)
 				{
-					int openPos = FindCharacter(connection->tempXMLBuffer, connection->tempXMLBufferSize, '<');
-					if(openPos < 0 || connection->tempXMLBufferSize <= openPos)
-					{
-						ui.AddToLog(("(" + connection->GetName() + ") XML Buffer is invalid").c_str());
-						socket->Close();
-						connection->isInUse = false;
-						return;
-					}
-					if(openPos != 0)
-					{
-						for(int put=0, get=openPos ; get<connection->tempXMLBufferSize ; ++put, ++get)
-							connection->tempXMLBuffer[put] = connection->tempXMLBuffer[get];
-						connection->tempXMLBufferSize -= openPos;
-					}
-
-					int closePos = FindCharacter(connection->tempXMLBuffer, connection->tempXMLBufferSize, '>');
-					if(0 < closePos || closePos < connection->tempXMLBufferSize)
-					{
-						ParseXMLMessage(*connection, reinterpret_cast<char*>(connection->tempXMLBuffer), closePos + 1);
-
-						for(int put=0, get=closePos+1 ; get<connection->tempXMLBufferSize ; ++put, ++get)
-							connection->tempXMLBuffer[put] = connection->tempXMLBuffer[get];
-						connection->tempXMLBufferSize -= closePos+1;
-					}
+					ui.AddToLog(("(" + connection->GetName() + ") XML Buffer is invalid").c_str());
+					connection->tempXMLBufferSize = 0;
+					connection->isInUse = false;
+					return;
 				}
-			} while(bufferSize != 0);
+				if(openPos != 0)
+				{
+					for(int put=0, get=openPos ; get<connection->tempXMLBufferSize ; ++put, ++get)
+						connection->tempXMLBuffer[put] = connection->tempXMLBuffer[get];
+					connection->tempXMLBufferSize -= openPos;
+				}
+
+				int closePos = FindCharacter(connection->tempXMLBuffer, connection->tempXMLBufferSize, '>');
+				if(0 < closePos || closePos < connection->tempXMLBufferSize)
+				{
+					ParseXMLMessage(*connection, reinterpret_cast<char*>(connection->tempXMLBuffer), closePos + 1);
+
+					for(int put=0, get=closePos+1 ; get<connection->tempXMLBufferSize ; ++put, ++get)
+						connection->tempXMLBuffer[put] = connection->tempXMLBuffer[get];
+					connection->tempXMLBufferSize -= closePos+1;
+				}
+			}
 
 			connection->isInUse = false;
 		}
@@ -410,7 +421,7 @@ public:
 					currentShuffleStartTime = clock;
 					++currentShuffle;
 
-					int64_t allProgress = clock - startTime;
+					int64_t allProgress = std::time(nullptr) - startTime;
 					int64_t remainingTime = totalLength - allProgress;
 					std::string message = "<swi game=\"" + std::to_string(shuffles[currentShuffle].index) + "\" time=\"" + std::to_string(remainingTime) + "\" />";
 #if USE_NS_WEBSOCKETSERVER == 1
@@ -605,6 +616,15 @@ int main(int argc, char *args[])
 #if USE_NS_WEBSOCKETSERVER == 1
 	certFile = std::move(argGetter.get<std::string>("q"));
 	keyFile = std::move(argGetter.get<std::string>("k"));
+
+	std::signal(SIGPIPE, SIG_IGN);
+	{
+		struct sigaction sa;
+		sa.sa_handler = SIG_IGN;        // Set action to ignore
+		sa.sa_flags = 0;
+		sigemptyset(&sa.sa_mask);       // Initialize mask to empty
+		sigaction(SIGPIPE, &sa, NULL);  // Apply to SIGPIPE
+	}
 
 	WebSocketServer<CGSServerWebSocketFunctions, CGSServerSSLListener, 16> server;
 	if(server.RunAsync(argGetter.get<int>("p")) == false)

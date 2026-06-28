@@ -12,6 +12,7 @@ namespace
 
 class NESEmu : public GameBase
 {
+protected:
 	NES_Cart_Base *cart;
 	NES_APUIO apuIO;
 	NES_PPU ppu;
@@ -28,6 +29,7 @@ class NESEmu : public GameBase
 	};
 	std::vector<OnFrameSet> onFrameSetList;
 	float audioMultiplier;
+	bool allowMuscleMemory = true;
 
 	static uint8_t GetMemoryFunc(uint16_t address, void *userdata)
 	{
@@ -76,6 +78,8 @@ public:
 			{
 				if(strcmp(key, "AudioMultiplier") == 0)
 					audioMultiplier = std::atof(value);
+				else if(strcmp(key, "AllowMuscleMemory") == 0)
+					allowMuscleMemory = value[0] == 'y';
 			}, [&](char const *command, char const *key, char const *value)
 			{
 				if(strcmp(command, "OnFrameSet") == 0)
@@ -129,6 +133,7 @@ public:
 			case 0: cart = new NES_Cart_NROM(rom_data); break;
 			case 1: cart = new NES_Cart_SxROM(rom_data); break;
 			case 2: cart = new NES_Cart_UxROM(rom_data); break;
+			case 3: cart = new NES_Cart_CNROM(rom_data); break;
 			default: return;// false;
 			}
 
@@ -138,14 +143,6 @@ public:
 
 			fclose(gameFile);
 		}
-
-		// k heres the thing, I'm running out of time for the first event so this is hacky but its enough for SMB
-		for(int i=0 ; i<60 ; ++i)
-			DoFrame_Internal();
-		apuIO.controllerState[0].start = true;
-		for(int i=0 ; i<8 ; ++i)
-			DoFrame_Internal();
-		apuIO.controllerState[0].start = false;
 
 		if(stateFile)
 		{
@@ -175,16 +172,25 @@ public:
 			ram.Set(code.address, code.value, true);
 	}
 
-	void SetControllerState(bool a, bool b, bool l, bool r, bool up, bool down, bool left, bool right)
+	void SetControllerState(bool a, bool b, bool l, bool r, bool up, bool down, bool left, bool right, bool muscleMemory)
 	{
 		NES_APUIO::Controller &c = apuIO.controllerState[0];
 		c.left = left;
 		c.right = right;
 		c.up = up;
 		c.down = down;
-		c.a = a;
-		c.b = b;
 		c.start = false;
+
+		if(muscleMemory && allowMuscleMemory)
+		{
+			c.a = b;
+			c.b = a;
+		}
+		else
+		{
+			c.a = a;
+			c.b = b;
+		}
 	}
 
 	void SetStartThisFrame(void)

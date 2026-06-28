@@ -17,13 +17,14 @@ class WebSocketServerBase
 {
 public:
 	virtual void BroadcastData(void const *data, unsigned int size) = 0;
+	virtual void SendDataToClient(SocketBase *socket, void const *data, unsigned int size) = 0;
 };
 
 class WebSocketFunctions
 {
 public:
 	virtual void OnNewConnection(WebSocketServerBase *server, SocketBase *socket, char const *userAgent) = 0;
-	virtual void OnDataReceived(WebSocketServerBase *server, SocketBase *socket) = 0;
+	virtual void OnDataReceived(WebSocketServerBase *server, SocketBase *socket, unsigned char const *buffer, unsigned int bufferSize, unsigned int totalSize) = 0;
 	virtual void OnConnectionClosed(WebSocketServerBase *server, SocketBase *socket) = 0;
 	virtual void Reset(void) {}
 };
@@ -51,7 +52,7 @@ class WebSocketServer : public WebSocketServerBase
 
 	struct WorkerEvent
 	{
-		WorkerEvent() { for(int i=0 ; i<32 ; ++i) connections[i] = nullptr; }
+		WorkerEvent() { for(int i=0 ; i<32 ; ++i) connections[i] = nullptr; data = nullptr; }
 		enum Type
 		{
 			Empty,
@@ -64,7 +65,11 @@ class WebSocketServer : public WebSocketServerBase
 			SocketBase *newConnection;
 			ConnectionPair *connections[32];
 		};
-		SharedData *data = nullptr;
+		union
+		{
+			SharedData *data;
+			unsigned char firstByte;
+		};
 	};
 
 	struct WatcherEvent
@@ -221,6 +226,7 @@ class WebSocketServer : public WebSocketServerBase
 
 	void AsyncAccepterFunction(void)
 	{
+		bool doSafetySleep = false;
 		while(accepter.IsGood() && !shouldClose)
 		{
 			SocketBase *newConnection = accepter.Accept();
@@ -232,7 +238,12 @@ class WebSocketServer : public WebSocketServerBase
 				event.type = WorkerEvent::NewConnection;
 				event.newConnection = newConnection;
 				workerCV.notify_one();
+				doSafetySleep = false;
 			}
+			else if(doSafetySleep)
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			else
+				doSafetySleep = true;
 		}
 
 		shouldClose = true;
@@ -249,6 +260,113 @@ class WebSocketServer : public WebSocketServerBase
 
 		running = false;
 	}
+
+#define CLOSE(__code, __string, __stringSize) \
+{ \
+	unsigned char header[4]; \
+	header[0] = 0x88; \
+	header[1] = (unsigned char)(__stringSize + 2); \
+	uint16_t code = uint16_t(__code); \
+	*reinterpret_cast<uint16_t*>(header + 2) = htobe16(code); \
+	connection->WriteData(header, 4); \
+	connection->WriteString(__string); \
+	connection->Close(); \
+	return; \
+} 
+	
+	void ProccessReadData(SocketBase *connection, unsigned char firstByte, FunctionsType &functions)
+	{
+		
+		unsigned int packetSize = 0;
+
+		// proccess until the timeout
+		// will need to do custom timeout stuff
+		Timeout timeout(NS_TIMEOUT);
+		bool lastPacket = (firstByte & 0x80) != 0;
+		int opCode = firstByte & 0x0F;
+		unsigned char secondByte = connection->ReadByte(timeout);
+		if(secondByte & 0x7F < 126)
+			packetSize = secondByte & 0x7F;
+		else if(secondByte & 0x7F == 126)
+		{
+			uint16_t sizeBE = 0;
+			connection->ReadData(timeout, &sizeBE, 2);
+			packetSize = be16toh(sizeBE);
+		}
+		else if(secondByte & 0x7F == 127)
+		{
+			uint64_t sizeBE = 0;
+			connection->ReadData(timeout, &sizeBE, 8);
+			uint64_t size = be64toh(sizeBE);
+			if(UINT32_MAX < size)
+				CLOSE(1009, "Message is too big", 18);
+			packetSize = (unsigned int)(size);
+		}
+
+		if(NS_MAX_UPLOAD_SIZE < packetSize)
+			CLOSE(1009, "Message is too big", 18);
+
+		bool doXorHash = secondByte & 0x80 != 0;
+		unsigned char xorHash[4] = {0};
+		if(doXorHash)
+			connection->ReadData(timeout, xorHash, 4);
+
+		if(opCode == 0 || opCode == 1 || opCode == 2) // Data
+		{
+			unsigned int readLength = 0;
+			unsigned char buffer[64 * 1024] = {0};
+			while(readLength < packetSize)
+			{
+				unsigned int readThisLoop = std::min((unsigned int)(64*1024), packetSize-readLength);
+				connection->ReadData(timeout, buffer, readThisLoop);
+
+				if(doXorHash)
+				{
+					for(unsigned int i=0 ; i<readThisLoop ; ++i)
+						buffer[i] ^= xorHash[(readLength + i) & 0x03];
+				}
+
+				functions.OnDataReceived(this, connection, buffer, readThisLoop, packetSize);
+				functions.Reset();
+				readLength += readThisLoop;
+			}
+		}
+		else if(opCode == 8) // Close
+		{
+			CLOSE(1000, "Bye Bye", 7);
+		}
+		else if(opCode == 9) // Ping
+		{
+			if(125 < packetSize)
+				CLOSE(1002, "Bad Ping", 8);
+
+			unsigned char data[125];
+			connection->ReadData(timeout, data, packetSize);
+			if(doXorHash)
+			{
+				for(unsigned int i=0 ; i<packetSize ; ++i)
+					data[i] ^= xorHash[i & 0x03];
+			}
+			
+			unsigned char header[2];
+			header[0] = 0x8A;
+			header[1] = secondByte;
+			connection->WriteData(header, 2);
+			connection->WriteData(data, packetSize);
+		}
+		else if(opCode == 10) // Pong
+		{
+			if(125 < packetSize)
+				CLOSE(1002, "Bad Pong", 8);
+			
+			unsigned char data[125];
+			connection->ReadData(timeout, data, packetSize);
+		}
+		else
+			CLOSE(1002, "Bad OpCode", 10);
+	}
+
+#undef CLOSE
 
 	static void WorkerThreadFunctionCaller(WebSocketServer *server)
 	{
@@ -319,9 +437,15 @@ class WebSocketServer : public WebSocketServerBase
 				break;
 
 			case WorkerEvent::ReadData:
-				functions.OnDataReceived(this, event.connections[0]->connection);
-				functions.Reset();
-				event.connections[0]->workerReadRef = false;
+				try
+				{
+					ProccessReadData(event.connections[0]->connection, event.firstByte, functions);
+					event.connections[0]->workerReadRef = false;
+				}
+				catch(...)
+				{
+					event.connections[0]->connection->Close();
+				}
 				break;
 
 			case WorkerEvent::SendData:
@@ -330,7 +454,14 @@ class WebSocketServer : public WebSocketServerBase
 					ConnectionPair *connection = event.connections[i];
 					if(connection != nullptr)
 					{
-						connection->connection->WriteData(event.data->data, event.data->size);
+						try
+						{
+							connection->connection->WriteData(event.data->data, event.data->size);
+						}
+						catch(...)
+						{
+							connection->connection->Close();
+						}
 						--connection->workerWriteRef;
 					}
 				}
@@ -456,15 +587,27 @@ class WebSocketServer : public WebSocketServerBase
 			{
 				if(connection.connection->IsOpen())
 				{
-					if(connection.connection->HasData() && connection.workerReadRef == false)
+					if(connection.workerReadRef == false)
 					{
-						std::unique_lock<std::mutex> lock(workerLock);
-						workerEvents.emplace_back();
-						WorkerEvent &newEvent = workerEvents.back();
-						newEvent.type = WorkerEvent::ReadData;
-						newEvent.connections[0] = &connection;
-						newEvent.connections[0]->workerReadRef = true;
-						workerCV.notify_one();
+						unsigned char firstByte = 0;
+						try
+						{
+							if(connection.connection->ReadSomeData(&firstByte, 1) == 1)
+							{
+								std::unique_lock<std::mutex> lock(workerLock);
+								workerEvents.emplace_back();
+								WorkerEvent &newEvent = workerEvents.back();
+								newEvent.type = WorkerEvent::ReadData;
+								newEvent.connections[0] = &connection;
+								newEvent.firstByte = firstByte;
+								newEvent.connections[0]->workerReadRef = true;
+								workerCV.notify_one();
+							}
+						}
+						catch(...)
+						{
+							connection.connection->Close();
+						}
 					}
 				}
 				else if(connection.workerReadRef == false && connection.workerWriteRef == 0)
@@ -513,17 +656,67 @@ public:
 	{
 		if(!running)
 			return;
-			
-		SharedData *newData = (SharedData*)(malloc(sizeof(SharedData) + size));
+
+		SharedData *newData = (SharedData*)(malloc(sizeof(SharedData) + 10 + size));
 		new(newData) SharedData;
-		newData->size = size;
-		std::memcpy(newData->data, data, size);
+
+		unsigned int headerSize = 10;
+		newData->data[0] = 0x82; // FIN bit (7) set with an opcode of 2 (binary data)
+		if(size < 126)
+		{
+			newData->data[1] = (unsigned char)(size);
+			headerSize = 2;
+		}
+		else if(size < INT16_MAX)
+		{
+			newData->data[1] = 126; // magic number for "next 2 bytes have the data length for this frame"
+			int16_t size16 = int16_t(size);
+			*reinterpret_cast<uint16_t*>(newData->data + 2) = htobe16(size16);
+			headerSize = 4;
+		}
+		else
+		{
+			newData->data[1] = 127; // magic number for "next 8 bytes have the data length for this frame"
+			int64_t size64 = size;
+			*reinterpret_cast<uint64_t*>(newData->data + 2) = htobe64(size64);
+		}
+		std::memcpy(newData->data + headerSize, data, size);
+		newData->size = size + headerSize;
 
 		std::lock_guard<std::mutex> lock(watcherLock);
 		watcherEvents.emplace_back();
 		WatcherEvent &event = watcherEvents.back();
 		event.type = WatcherEvent::SendData;
 		event.data = newData;
+	}
+
+	void SendDataToClient(SocketBase *socket, void const *data, unsigned int size)
+	{
+		unsigned char header[10];
+		header[0] = 0x82; // FIN bit (7) set with an opcode of 2 (binary data)
+
+		unsigned int headerSize = 10;
+		if(size < 126)
+		{
+			header[1] = (unsigned char)(size);
+			headerSize = 2;
+		}
+		else if(size < INT16_MAX)
+		{
+			header[1] = 126; // magic number for "next 2 bytes have the data length for this frame"
+			int16_t size16 = int16_t(size);
+			*reinterpret_cast<uint16_t*>(header + 2) = htobe16(size16);
+			headerSize = 4;
+		}
+		else
+		{
+			header[1] = 127; // magic number for "next 8 bytes have the data length for this frame"
+			int64_t size64 = size;
+			*reinterpret_cast<uint64_t*>(header + 2) = htobe64(size64);
+		}
+
+		socket->WriteData(header, headerSize);
+		socket->WriteData(data, size);
 	}
 };
 

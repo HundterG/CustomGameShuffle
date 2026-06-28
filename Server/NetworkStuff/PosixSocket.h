@@ -42,7 +42,20 @@ public:
 
 	bool IsOpen(void)
 	{
-		return 0 <= socket;
+		if(socket < 0)
+			return false;
+
+		pollfd request;
+		std::memset(&request, 0, sizeof(pollfd));
+		request.fd = socket;
+		poll(&request, 1, 0);
+		if(request.revents != 0)
+		{
+			Close();
+			return false;
+		}
+
+		return true;
 	}
 
 	void Close(void)
@@ -142,16 +155,32 @@ public:
 		//std::cout << "\n";
 	}
 
-	bool HasData(void)
+	unsigned int ReadSomeData(void *buffer, unsigned int size)
 	{
 		if(socket < 0)
-			return false;
+			return 0;
 
-		pollfd request;
-		std::memset(&request, 0, sizeof(pollfd));
-		request.fd = socket;
-		request.events = POLLIN;
-		return 0 < poll(&request, 1, 0);
+		unsigned int readC = 0;
+		unsigned char *bufferC = reinterpret_cast<unsigned char*>(buffer);
+		while(readC < size)
+		{
+			int ret = read(socket, bufferC + readC, size - readC);
+			if(ret < 0)
+			{
+				if(errno == EAGAIN || errno == EWOULDBLOCK)
+					return readC;
+				else
+				{
+					close(socket);
+					socket = -1;
+					return 0;
+				}
+			}
+			else
+				readC += ret;
+		}
+
+		return readC;
 	}
 };
 

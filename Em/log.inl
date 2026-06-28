@@ -7,6 +7,26 @@ namespace Log
 
 #define WriteLog(...) { emscripten_lock_busyspin_waitinf_acquire(&Log::lock); snprintf(Log::buffer + Log::writePos, (16*1024) - Log::writePos, __VA_ARGS__); Log::writePos += strlen(Log::buffer + Log::writePos); emscripten_lock_release(&Log::lock); }
 
+void WriteLogBuffer(char const *msg, int size, bool addLineBreak)
+{
+	emscripten_lock_busyspin_waitinf_acquire(&Log::lock);
+	for(int i=0 ; i<size ; ++i)
+	{
+		if((16 * 1024) <= Log::writePos + 1)
+			break;
+		Log::buffer[Log::writePos] = msg[i];
+		++Log::writePos;
+	}
+	Log::buffer[Log::writePos] = 0;
+
+	if(addLineBreak)
+	{
+		snprintf(Log::buffer + Log::writePos, (16*1024) - Log::writePos, "\n");
+		Log::writePos += strlen(Log::buffer + Log::writePos);
+	}
+	emscripten_lock_release(&Log::lock);
+}
+
 void FlushLog(void)
 {
 	if(0 < Log::writePos)

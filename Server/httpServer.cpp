@@ -1,5 +1,6 @@
 // g++ httpServer.cpp -g -lssl -lcrypto -lcurses -o http.out
 #include <map>
+#include <csignal>
 
 #include "NetworkStuff/HTTPRequestProccess.h"
 #include "NetworkStuff/HTTPServer.h"
@@ -24,6 +25,9 @@ ServerUI ui;
 std::string certFile;
 std::string keyFile;
 
+std::mutex certBotKeyLock;
+std::string certBotKey;
+
 class HTTPServerProccess : public HTTPRequestProccess
 {
 public:
@@ -31,14 +35,24 @@ public:
 	{
 		auto fileIt = files.end();
 		bool isDefault = false;
+		bool isCertBotKeyRequest = false;
 		ParseHelper(socket, 
 			[&](char const *requestCode, char const *HTTPVersion, char const *uri)
 			{
 				if(std::strcmp(requestCode, "GET") != 0)
 					return HelperFunctionReturn::FORBIDDEN;
 				
-				if(uri[0] == '/' || uri[0] == '\\')
+				while(uri[0] == '/' || uri[0] == '\\')
 					++uri;
+
+				if(uri[0] == '.')
+				{
+					if(0 <= std::strcmp(uri, ".well-known/acme-challenge"))
+					{
+						isCertBotKeyRequest = true;
+						return HelperFunctionReturn::OK;
+					}
+				}
 
 				HSTL::ID fileID = HSTL::defaultID;
 				if(uri[0] == 0)
@@ -73,6 +87,25 @@ public:
 			[](unsigned char const *buffer, unsigned int bufferSize, uint64_t totalSize){ return HelperFunctionReturn::FORBIDDEN; }, 
 			[&](SocketBase *socket, char const *requestCode, char const *uri)
 			{
+				if(isCertBotKeyRequest)
+				{
+					std::lock_guard<std::mutex> g(certBotKeyLock);
+					if(certBotKey.empty())
+					{
+						ui.AddToLog("/CERTBOTKEY (NOT FOUND)");
+						return HelperFunctionReturn::NOT_FOUND;
+					}
+					else
+					{
+						ui.AddToLog("/CERTBOTKEY (OK)");
+						WriteResponse(socket, "200 OK", nullptr, 0, certBotKey.c_str(), certBotKey.size());
+						return HelperFunctionReturn::OK;
+					}
+				}
+
+				if(fileIt == files.end())
+					return HelperFunctionReturn::BAIL;
+
 				std::pair<char const*, char const*> headers[6];
 				headers[0].first = "Content-Type"; headers[0].second = fileIt->second.mime.c_str(); 
 				headers[1].first = "Cross-Origin-Opener-Policy"; headers[1].second = "same-origin"; 
@@ -113,7 +146,7 @@ public:
 
 	int GetMaxInputTemplates(void)
 	{
-		return 2;
+		return 3;
 	}
 	void GetInputTemplate(int index, char line[128])
 	{
@@ -125,6 +158,10 @@ public:
 
 		case 1:
 			std::strcpy(line, "Tail");
+			break;
+
+		case 2:
+			std::strcpy(line, "CertBotKey ");
 			break;
 
 		default:
@@ -139,6 +176,14 @@ public:
 			ui.StopRunning();
 		else if(std::strcmp(line, "tail") == 0)
 			ui.GoToBottomOfLog();
+		else if(0 < std::strcmp(line, "certbotkey") && line[10] == ' ')
+		{
+			std::lock_guard<std::mutex> g(certBotKeyLock);
+			certBotKey.assign(line + 11);
+			char logString[256] = {0};
+			snprintf(logString, sizeof(logString), "CertBot Key has been updated - %s", certBotKey.c_str());
+			ui.AddToLog(logString);
+		}
 	}
 } HTTPUIFunctions;
 
@@ -165,6 +210,7 @@ int main(int argc, char *args[])
 	argGetter.set_optional<std::string>("l", "redirectLocation", std::string(), "Location to http redirect to (Must be paired with redirectPort)");
 	argGetter.set_optional<std::string>("k", "certKey", std::string(), "SSL key file");
 	argGetter.set_optional<std::string>("q", "certFile", std::string(), "SSL cert file");
+	argGetter.set_optional<int>("e", "returnValue", 0, "Return value of main");
 	argGetter.run_and_exit_if_error();
 
 	{
@@ -262,6 +308,15 @@ int main(int argc, char *args[])
 	certFile = std::move(argGetter.get<std::string>("q"));
 	keyFile = std::move(argGetter.get<std::string>("k"));
 
+	std::signal(SIGPIPE, SIG_IGN);
+	{
+		struct sigaction sa;
+		sa.sa_handler = SIG_IGN;        // Set action to ignore
+		sa.sa_flags = 0;
+		sigemptyset(&sa.sa_mask);       // Initialize mask to empty
+		sigaction(SIGPIPE, &sa, NULL);  // Apply to SIGPIPE
+	}
+	
 	HTTPServer<HTTPServerProccess, HTTPServerSSLListener, 64> serverMain;
 	if(serverMain.RunAsync(argGetter.get<int>("p")) == false)
 	{
@@ -280,4 +335,5 @@ int main(int argc, char *args[])
 	}
 
 	ui.Run(HTTPUIFunctions);
+	return argGetter.get<int>("e");
 }

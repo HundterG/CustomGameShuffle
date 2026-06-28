@@ -4,6 +4,7 @@
 
 class GBEmu : public GameBase
 {
+protected:
 	sb_emu_state_t game;
 	sb_gb_t emu;
 	gb_scratch_t ram;
@@ -16,6 +17,7 @@ class GBEmu : public GameBase
 	};
 	std::vector<OnFrameSet> onFrameSetList;
 	float audioMultiplier = 0.2f;
+	bool allowMuscleMemory = true;
 
 public:
 	void Init(std::string &config)
@@ -36,6 +38,8 @@ public:
 			{
 				if(strcmp(key, "AudioMultiplier") == 0)
 					audioMultiplier = std::atof(value);
+				else if(strcmp(key, "AllowMuscleMemory") == 0)
+					allowMuscleMemory = value[0] == 'y';
 			}, [&](char const *command, char const *key, char const *value)
 			{
 				if(strcmp(command, "OnFrameSet") == 0)
@@ -123,15 +127,24 @@ public:
 			sb_store8(&emu, code.address, code.value);
 	}
 
-	void SetControllerState(bool a, bool b, bool l, bool r, bool up, bool down, bool left, bool right)
+	void SetControllerState(bool a, bool b, bool l, bool r, bool up, bool down, bool left, bool right, bool muscleMemory)
 	{
 		game.joy.inputs[SE_KEY_LEFT] = left;
 		game.joy.inputs[SE_KEY_RIGHT] = right;
 		game.joy.inputs[SE_KEY_UP] = up;
 		game.joy.inputs[SE_KEY_DOWN] = down;
-		game.joy.inputs[SE_KEY_A] = a;
-		game.joy.inputs[SE_KEY_B] = b;
 		game.joy.inputs[SE_KEY_START] = false;
+
+		if(muscleMemory && allowMuscleMemory)
+		{
+			game.joy.inputs[SE_KEY_A] = b;
+			game.joy.inputs[SE_KEY_B] = a;
+		}
+		else
+		{
+			game.joy.inputs[SE_KEY_A] = a;
+			game.joy.inputs[SE_KEY_B] = b;
+		}
 	}
 
 	void SetStartThisFrame(void)
@@ -159,6 +172,7 @@ public:
 
 class GBAEmu : public GameBase
 {
+protected:
 	sb_emu_state_t game;
 	gba_t emu;
 	gba_scratch_t ram;
@@ -171,6 +185,7 @@ class GBAEmu : public GameBase
 	};
 	std::vector<OnFrameSet> onFrameSetList;
 	float audioMultiplier = 0.25f;
+	bool allowMuscleMemory = true;
 
 public:
 	void Init(std::string &config)
@@ -191,6 +206,8 @@ public:
 			{
 				if(strcmp(key, "AudioMultiplier") == 0)
 					audioMultiplier = std::atof(value);
+				else if(strcmp(key, "AllowMuscleMemory") == 0)
+					allowMuscleMemory = value[0] == 'y';
 			}, [&](char const *command, char const *key, char const *value)
 			{
 				if(strcmp(command, "OnFrameSet") == 0)
@@ -275,17 +292,26 @@ public:
 			gba_store8_debug(&emu, code.address, code.value);
 	}
 
-	void SetControllerState(bool a, bool b, bool l, bool r, bool up, bool down, bool left, bool right)
+	void SetControllerState(bool a, bool b, bool l, bool r, bool up, bool down, bool left, bool right, bool muscleMemory)
 	{
 		game.joy.inputs[SE_KEY_LEFT] = left;
 		game.joy.inputs[SE_KEY_RIGHT] = right;
 		game.joy.inputs[SE_KEY_UP] = up;
 		game.joy.inputs[SE_KEY_DOWN] = down;
-		game.joy.inputs[SE_KEY_A] = a;
-		game.joy.inputs[SE_KEY_B] = b;
 		game.joy.inputs[SE_KEY_L] = l;
 		game.joy.inputs[SE_KEY_R] = r;
 		game.joy.inputs[SE_KEY_START] = false;
+
+		if(muscleMemory && allowMuscleMemory)
+		{
+			game.joy.inputs[SE_KEY_A] = b;
+			game.joy.inputs[SE_KEY_B] = a;
+		}
+		else
+		{
+			game.joy.inputs[SE_KEY_A] = a;
+			game.joy.inputs[SE_KEY_B] = b;
+		}
 	}
 
 	void SetStartThisFrame(void)

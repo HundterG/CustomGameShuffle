@@ -14,6 +14,18 @@ class RedirectServer
 	std::atomic_bool shouldClose = ATOMIC_VAR_INIT(false);
 	char response[4 * 1024] = {0};
 	int responseSize = 0;
+	char errorResponse[28] = 
+	{
+		'H', 'T', 'T', 'P', '/', '1', '.', '1', ' ', 
+		'4', '0', '0', ' ', 'B', 'A', 'D', ' ', 'R', 'E', 'Q', 'U', 'E', 'S', 'T',
+		0x0D, 0x0A,
+		0x0D, 0x0A
+	};
+
+	static bool IsASCII(unsigned char c)
+	{
+		return 32 <= c && c < 128;
+	}
 
 	void MakeResponse(char const *location)
 	{
@@ -43,8 +55,6 @@ class RedirectServer
 		writeCRLF();
 		writeString("Location: ");
 		writeString(location);
-		writeCRLF();
-		writeCRLF();
 	}
 
 	bool StartFunction(uint16_t port, char const *location)
@@ -69,18 +79,74 @@ class RedirectServer
 		server->AsyncAccepterFunction();
 	}
 
+#define RETURNBADREQUEST(__msg) { socket->WriteData(errorResponse, 28); /*std::cout << __msg << "\n";*/ socket->Close(); return; }
+
+	void DoRequest(SocketBase *socket)
+	{
+		Timeout timeout(NS_TIMEOUT);
+		bool sizeGood = false;
+		for(int i=0 ; i<30 ; ++i)
+		{
+			unsigned char c = socket->ReadByte(timeout);
+			if(timeout.GetCancel()) { socket->Close(); return; }
+			if(c == ' ')
+			{
+				sizeGood = true;
+				break;
+			}
+		}
+		if(!sizeGood)
+			RETURNBADREQUEST("Invalid size in code");
+
+		sizeGood = false;
+		char uri[1024] = {0};
+		for(int i=0 ; i<1020 ; ++i)
+		{
+			unsigned char c = socket->ReadByte(timeout);
+			if(timeout.GetCancel()) { socket->Close(); return; }
+			if(c == ' ')
+			{
+				sizeGood = true;
+				break;
+			}
+			if(!IsASCII(c))
+				RETURNBADREQUEST("Invalid ASCII in url");
+			uri[i] = char(c);
+		}
+		if(!sizeGood)
+			RETURNBADREQUEST("Invalid size in url");
+
+		socket->WriteData(response, responseSize);
+		socket->WriteString(uri);
+		socket->WriteCRLF();
+		socket->WriteCRLF();
+	}
+
+#undef RETURNBADREQUEST
+
 	void AsyncAccepterFunction(void)
 	{
+		bool doSafetySleep = false;
 		while(accepter.IsGood() && !shouldClose)
 		{
 			SocketBase *newConnection = accepter.Accept();
 			if(newConnection)
 			{
-				if(newConnection->Prepare())
-					newConnection->WriteData(response, responseSize);
+				try
+				{
+					if(newConnection->Prepare())
+						DoRequest(newConnection);
+				}
+				catch(...)
+				{}
 				newConnection->Close();
 				accepter.HandleDelete(newConnection);
+				doSafetySleep = false;
 			}
+			else if(doSafetySleep)
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			else
+				doSafetySleep = true;
 		}
 		running = false;
 	}

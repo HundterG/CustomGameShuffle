@@ -54,9 +54,10 @@ class GameBase
 {
 public:
 	virtual void Init(std::string &config) {}
+	virtual bool Load(void) { return true; }
 	virtual void InitRender(void) {}
 	virtual void Tick(void) {}
-	virtual void SetControllerState(bool a, bool b, bool l, bool r, bool up, bool down, bool left, bool right) {}
+	virtual void SetControllerState(bool a, bool b, bool l, bool r, bool up, bool down, bool left, bool right, bool muscleMemory) {}
 	virtual void SetStartThisFrame(void) {}
 	virtual void Render(void)
 	{
@@ -81,11 +82,17 @@ EM_JS(int, GetGameCanvasHeight, (), {
 	return gameCanvas.clientHeight;
 });
 
+EM_JS(bool, GetMuscleMemory, (), {
+	return GlobalSetting_MuscleMemory;
+});
+
 #include "CommonAudio.inl"
 #include "CommonVideo.inl"
 #include "testgear.inl"
 #include "Sky/sky.inl"
 #include "NES/NESEmulator.inl"
+
+#include "GameClasses.h"
 
 EM_JS(void, SetProgress, (int p), {
 	var progressElement = document.querySelector('.progressBar');
@@ -147,7 +154,16 @@ EM_JS(void, SetTimerTime, (), {
 
 EM_JS(void, SetInGameMenu_Internal, (int volume), {
 	var box = document.querySelector('.box');
-	box.innerHTML = '<div class="inGameSettingsMenu" onmouseleave="_ShowTimer()">Volume:<br><input type="range" oninput="_SetVolume(event.target.value)" min="0" max="100" value="' + volume + '"></div>';
+	var settingsHTML = '<div class="inGameSettingsMenu" onmouseleave="_ShowTimer()">Volume:<input type="range" oninput="_SetVolume(event.target.value)" min="0" max="100" value="' + volume + '">';
+	if(GlobalSetting_UseGamepad)
+	{
+		if(GlobalSetting_MuscleMemory)
+			settingsHTML += '<br>Muscle Memory:<input type="checkbox" onchange="GlobalSetting_MuscleMemory = event.target.checked" checked>';
+		else
+			settingsHTML += '<br>Muscle Memory:<input type="checkbox" onchange="GlobalSetting_MuscleMemory = event.target.checked">';
+	}
+	settingsHTML += '</div>';
+	box.innerHTML = settingsHTML;
 });
 
 EM_JS(void, SetPreGame, (int show), {
@@ -198,6 +214,7 @@ namespace
 		Entry,
 		OpenGameListFile,
 		SetupEmulators_Game,
+		SetupEmulators_Load,
 		SetupEmulators_Render,
 		ConnectToServer,
 		WaitForServer,
@@ -238,7 +255,7 @@ extern "C"
 	{
 		if(0 <= newIndex && newIndex < Games.size())
 		{
-			emscripten_lock_waitinf_acquire(&currentIndexLock);
+			emscripten_lock_busyspin_waitinf_acquire(&currentIndexLock);
 			Games[currentIndex]->OnSwapOff();
 			currentIndex = newIndex;
 			Games[currentIndex]->OnSwapOn();
@@ -309,7 +326,7 @@ extern "C"
 
 	int GetGameIndex(void)
 	{
-		emscripten_lock_waitinf_acquire(&currentIndexLock);
+		emscripten_lock_busyspin_waitinf_acquire(&currentIndexLock);
 		int ret = currentIndex;
 		emscripten_lock_release(&currentIndexLock);
 		return ret;
@@ -319,14 +336,15 @@ extern "C"
 #if defined(CGS_DEBUG_COMMANDS)
 void QueueDebugDownload(void const *buffer, size_t size)
 {
-	emscripten_lock_waitinf_acquire(&debugDownloadLock);
-	if(debugSaveData == nullptr)
-	{
-		debugSaveData = malloc(size);
-		memcpy(debugSaveData, buffer, size);
-		debugSaveSize = size;
-	}
-	emscripten_lock_release(&debugDownloadLock);
+	download("file", buffer, size);
+	//emscripten_lock_busyspin_waitinf_acquire(&debugDownloadLock);
+	//if(debugSaveData == nullptr)
+	//{
+	//	debugSaveData = malloc(size);
+	//	memcpy(debugSaveData, buffer, size);
+	//	debugSaveSize = size;
+	//}
+	//emscripten_lock_release(&debugDownloadLock);
 }
 #endif
 
@@ -384,24 +402,39 @@ void Idle(void)
 			if(!typeAttribute.empty())
 			{
 				GameBase *newGame = &NullGame;
-				if(std::strncmp(typeAttribute.as_string(), "TEST", 5) == 0)
-					newGame = new GLGears();
-				else if(std::strncmp(typeAttribute.as_string(), "GB", 3) == 0)
-					newGame = new GBEmu();
-				else if(std::strncmp(typeAttribute.as_string(), "GBA", 4) == 0)
-					newGame = new GBAEmu();
-				else if(std::strncmp(typeAttribute.as_string(), "NES", 4) == 0)
-					newGame = new NESEmu();
-				else
+
+				for(int i=0 ; i<CustomGameClassListSize ; ++i)
 				{
-					SetError(true);
-					throw "GameList game had an unknown type\n";
+					CustomGameClass &game = CustomGameClassList[i];
+					if(std::strncmp(typeAttribute.as_string(), game.code, game.codeLength) == 0)
+					{
+						newGame = game.makeFunction();
+						break;
+					}
 				}
+
+				if(newGame == nullptr)
+				{
+					if(std::strncmp(typeAttribute.as_string(), "TEST", 5) == 0)
+						newGame = new GLGears();
+					else if(std::strncmp(typeAttribute.as_string(), "GB", 3) == 0)
+						newGame = new GBEmu();
+					else if(std::strncmp(typeAttribute.as_string(), "GBA", 4) == 0)
+						newGame = new GBAEmu();
+					else if(std::strncmp(typeAttribute.as_string(), "NES", 4) == 0)
+						newGame = new NESEmu();
+					else
+					{
+						SetError(true);
+						throw "GameList game had an unknown type\n";
+					}
+				}
+
 				std::string command = cmdAttribute.as_string();
 				newGame->Init(command);
 				Games.push_back(newGame);
 				++tempLoopCounter;
-				SetProgress(int((float(tempLoopCounter)/targetGameCount) * 30) + 40);
+				SetProgress(int((float(tempLoopCounter)/targetGameCount) * 20) + 40);
 				gameWalker = gameWalker.next_sibling("game");
 			}
 			else
@@ -416,9 +449,25 @@ void Idle(void)
 			gameListFile.reset();
 			tempLoopCounter = 0;
 			targetGameCount = Games.size();
-			loadStage = LoadStage::SetupEmulators_Render;
+			loadStage = LoadStage::SetupEmulators_Load;
 		}
 	}
+		break;
+
+	case LoadStage::SetupEmulators_Load:
+		if(tempLoopCounter < targetGameCount)
+		{
+			if(Games[tempLoopCounter]->Load())
+			{
+				++tempLoopCounter;
+				SetProgress(int((float(tempLoopCounter)/targetGameCount) * 10) + 60);
+			}
+		}
+		else
+		{
+			tempLoopCounter = 0;
+			loadStage = LoadStage::SetupEmulators_Render;
+		}
 		break;
 
 	case LoadStage::SetupEmulators_Render:
@@ -430,7 +479,15 @@ void Idle(void)
 		}
 		else
 		{
+#if !defined(CGS_DEBUG_COMMANDS)
 			loadStage = LoadStage::ConnectToServer;
+#else
+			EM_ASM( resizeCodeReady = true; OnDownloadEnd(); );
+			SetPreGame(0);
+			loadStage = LoadStage::InProgress;
+			SetGameIndex(0);
+			stageStartTime = lastIdleTime = emscripten_performance_now();
+#endif
 		}
 		break;
 
@@ -479,7 +536,7 @@ void Idle(void)
 			while((1000.0/60.0) < tickTime && framesThisIdle < 4)
 			{
 				int gameIndex = GetGameIndex();
-				Games[gameIndex]->SetControllerState(buttons[0], buttons[1], buttons[2], buttons[3], buttons[6], buttons[7], buttons[4], buttons[5]);
+				Games[gameIndex]->SetControllerState(buttons[0], buttons[1], buttons[2], buttons[3], buttons[6], buttons[7], buttons[4], buttons[5], GetMuscleMemory());
 #if defined(CGS_DEBUG_COMMANDS)
 				if(0 < debugDoStart)
 				{
@@ -508,11 +565,16 @@ void Idle(void)
 				++debugTickCount;
 			}
 
+			if(1000 < tickTime)
+				tickTime = 0;
+
 			if(1000 < debugTickTime)
 			{
 				WriteLog("FPS: %d - In: %f\n", debugTickCount, float(debugTickTime));
 				debugTickCount = 0;
 				debugTickTime -= 1000;
+				if(1000 < debugTickTime)
+					debugTickTime = 0;
 			}
 
 			lastIdleTime = t;
@@ -520,16 +582,20 @@ void Idle(void)
 
 		glutPostRedisplay();
 #if defined(CGS_DEBUG_COMMANDS)
-		emscripten_lock_waitinf_acquire(&debugDownloadLock);
-		if(debugSaveData != nullptr)
-		{
-			download("file", debugSaveData, debugSaveSize);
-			free(debugSaveData);
-			debugSaveData = nullptr;
-			debugSaveSize = 0;
-		}
-		emscripten_lock_release(&debugDownloadLock);
+		//{
+		//	emscripten_lock_busyspin_waitinf_acquire(&debugDownloadLock);
+		//	if(debugSaveData != nullptr)
+		//	{
+		//		download("file", debugSaveData, debugSaveSize);
+		//		free(debugSaveData);
+		//		debugSaveData = nullptr;
+		//		debugSaveSize = 0;
+		//	}
+		//	emscripten_lock_release(&debugDownloadLock);
+		//}
 #endif
+
+#if !defined(CGS_DEBUG_COMMANDS)
 		{
 			double remainingSeconds = ((remainingTime * 1000.0f) - (emscripten_performance_now() - stageStartTime)) / 1000.0f;
 			if(remainingSeconds < 0)
@@ -545,6 +611,7 @@ void Idle(void)
 				SetTimer(minutes, subSecond);
 			}
 		}
+#endif
 		break;
 
 	case LoadStage::GameEndWait:
@@ -598,6 +665,7 @@ bool OnServerMessage(int /*eventType*/, const EmscriptenWebSocketMessageEvent *e
 				int time = timeAttribute.as_int();
 				if(0 < time)
 					remainingTime = time;
+				stageStartTime = emscripten_performance_now();
 
 				auto gameAttribute = switchNode.attribute("game");
 				SetGameIndex(gameAttribute.as_int());
@@ -639,9 +707,9 @@ bool OnServerMessage(int /*eventType*/, const EmscriptenWebSocketMessageEvent *e
 
 bool OnServerClose(int /*eventType*/, const EmscriptenWebSocketCloseEvent *e, void*)
 {
-	if(loadStage != LoadStage::AfterGame)
+	if(!(loadStage == LoadStage::GameEndWait || loadStage == LoadStage::AfterGame))
 	{
-		SetError(loadStage != LoadStage::InProgress);
+		SetError(!(loadStage == LoadStage::WaitForStart || loadStage == LoadStage::InProgress));
 		loadStage = LoadStage::AfterGame;
 		throw "Connection has been interupted\n";
 	}
@@ -650,9 +718,9 @@ bool OnServerClose(int /*eventType*/, const EmscriptenWebSocketCloseEvent *e, vo
 
 bool OnServerError(int /*eventType*/, const EmscriptenWebSocketErrorEvent *e, void*)
 {
-	if(loadStage != LoadStage::AfterGame)
+	if(!(loadStage == LoadStage::GameEndWait || loadStage == LoadStage::AfterGame))
 	{
-		SetError(loadStage != LoadStage::InProgress);
+		SetError(!(loadStage == LoadStage::WaitForStart || loadStage == LoadStage::InProgress));
 		loadStage = LoadStage::AfterGame;
 		throw "Could not connect to server\n";
 	}

@@ -25,6 +25,8 @@ struct NES_Cart_Base
 	virtual void Get(uint16_t address, uint8_t &value, bool extrinsic) = 0;
 	virtual void SetV(uint16_t address, uint8_t value, bool extrinsic) = 0;
 	virtual void GetV(uint16_t address, uint8_t &value, bool extrinsic) = 0;
+	virtual void SetIO(uint16_t address, uint8_t value){}
+	virtual uint8_t GetIO(uint16_t address){ return 0; }
 	virtual void OnCycleReset(void) {}
 };
 
@@ -196,13 +198,13 @@ struct NES_Cart_SxROM : public NES_Cart_Base
 						SetBanks();
 						if(tileMapperType == 0)
 						{
-							currentVBanks[0] = tileBanks[currentVBankIndexs[0] & 0xFE];
-							currentVBanks[1] = tileBanks[currentVBankIndexs[0] | 0x01];
+							currentVBanks[0] = tileBanks[(currentVBankIndexs[0] & 0xFE) % tileChunks];
+							currentVBanks[1] = tileBanks[(currentVBankIndexs[0] | 0x01) % tileChunks];
 						}
 						else
 						{
-							currentVBanks[0] = tileBanks[currentVBankIndexs[0]];
-							currentVBanks[1] = tileBanks[currentVBankIndexs[1]];
+							currentVBanks[0] = tileBanks[currentVBankIndexs[0] % tileChunks];
+							currentVBanks[1] = tileBanks[currentVBankIndexs[1] % tileChunks];
 						}
 					}
 					else if(address < 0xC000)
@@ -211,18 +213,18 @@ struct NES_Cart_SxROM : public NES_Cart_Base
 						currentVBankIndexs[0] = shiftRegister;
 						if(tileMapperType == 0)
 						{
-							currentVBanks[0] = tileBanks[currentVBankIndexs[0] & 0xFE];
-							currentVBanks[1] = tileBanks[currentVBankIndexs[0] | 0x01];
+							currentVBanks[0] = tileBanks[(currentVBankIndexs[0] & 0xFE) % tileChunks];
+							currentVBanks[1] = tileBanks[(currentVBankIndexs[0] | 0x01) % tileChunks];
 						}
 						else
-							currentVBanks[0] = tileBanks[currentVBankIndexs[0]];
+							currentVBanks[0] = tileBanks[currentVBankIndexs[0] % tileChunks];
 					}
 					else if(address < 0xE000)
 					{
 						// second vram bank
 						currentVBankIndexs[1] = shiftRegister;
 						if(tileMapperType != 0)
-							currentVBanks[1] = tileBanks[currentVBankIndexs[1]];
+							currentVBanks[1] = tileBanks[currentVBankIndexs[1] % tileChunks];
 					}
 					else
 					{
@@ -240,6 +242,8 @@ struct NES_Cart_SxROM : public NES_Cart_Base
 			{
 				// reset
 				programMapperType = 3;
+				shiftRegister = 0;
+				shiftRegisterSize = 0;
 				SetBanks();
 			}
 
@@ -383,5 +387,180 @@ struct NES_Cart_UxROM : public NES_Cart_Base
 		}
 
 		value = extraVRAM[address];
+	}
+};
+
+struct NES_Cart_CNROM : public NES_Cart_NROM
+{
+	uint8_t *tileBanks[4];
+	uint8_t *currentVBank;
+
+	NES_Cart_CNROM(uint8_t *rom) : NES_Cart_NROM(rom)
+	{
+		currentVBank = tileBanks[0] = startOfTile;
+		for(int i=1 ; i<4 ; ++i)
+		{
+			if(i < tileChunks)
+				tileBanks[i] = tileBanks[i-1] + (8 * 1024);
+			else
+				tileBanks[i] = nullptr;
+		}
+	}
+
+	void Set(uint16_t address, uint8_t value, bool e)
+	{
+		if(0x8000 <= address)
+		{
+			uint8_t progValue = 0;
+			if(programChunks == 1)
+				progValue = startOfProgram[(address - 0x8000) & 0x3FFF];
+			else
+				progValue = startOfProgram[address - 0x8000];
+			value = (value & progValue) & 0x03;
+			currentVBank = tileBanks[value];
+		}
+		else
+			NES_Cart_NROM::Set(address, value, e);
+	}
+	void GetV(uint16_t address, uint8_t &value, bool e)
+	{
+		if(address < 0x2000)
+			value = currentVBank[address];
+		else
+			NES_Cart_NROM::GetV(address, value, e);
+	}
+};
+
+struct NES_Cart_Namco_210 : public NES_Cart_Base
+{
+	uint8_t extraRAM[8 * 1024];
+	uint8_t extraVRAM[12 * 1024]; // normally 8kb but made 12kb because I put ppu internal ram on the cart
+	uint8_t *programBanks[64];
+	uint8_t *currentPBanks[4];
+	uint8_t *tileBanks[256];
+	uint8_t *currentVBanks[8];
+
+	bool namcoRegister = false;
+
+	NES_Cart_Namco_210(uint8_t *rom) : NES_Cart_Base(rom)
+	{
+		programBanks[0] = startOfProgram;
+		for(int i=1 ; i<64 ; ++i)
+		{
+			if(i < programChunks*2)
+				programBanks[i] = programBanks[i-1] + (8 * 1024);
+			else
+				programBanks[i] = nullptr;
+		}
+
+		tileBanks[0] = startOfTile;
+		for(int i=1 ; i<256 ; ++i)
+		{
+			if(i < tileChunks*8)
+				tileBanks[i] = tileBanks[i-1] + (1024);
+			else
+				tileBanks[i] = nullptr;
+		}
+
+		currentPBanks[0] = startOfProgram;
+		currentPBanks[1] = startOfProgram;
+		currentPBanks[2] = startOfProgram;
+		currentPBanks[3] = programBanks[(programChunks*2) - 1];
+		currentVBanks[0] = tileBanks[0];
+		currentVBanks[1] = tileBanks[0];
+		currentVBanks[2] = tileBanks[0];
+		currentVBanks[3] = tileBanks[0];
+		currentVBanks[4] = tileBanks[0];
+		currentVBanks[5] = tileBanks[0];
+		currentVBanks[6] = tileBanks[0];
+		currentVBanks[7] = tileBanks[0];
+	}
+
+	void Set(uint16_t address, uint8_t value, bool extrinsic)
+	{
+		if(0x8000 <= address)
+		{
+			if(address < 0xC000)
+			{
+				address = (address - 0x8000) / 0x0800;
+				currentVBanks[address] = tileBanks[value];
+			}
+			else if(address < 0xC800)
+			{} // Enables prog ram. Ignored because its always enabled
+			else if(0xE000 <= address && address < 0xF800)
+			{
+				address = (address - 0xE000) / 0x0800;
+				currentPBanks[address] = programBanks[value & 0x3F];
+			}
+		}
+	}
+
+	void Get(uint16_t address, uint8_t &value, bool)
+	{
+		if(0xE000 <= address)
+			value = currentPBanks[3][(address - 0xE000)];
+		else if(0xC000 <= address)
+			value = currentPBanks[2][(address - 0xC000)];
+		else if(0xA000 <= address)
+			value = currentPBanks[1][(address - 0xA000)];
+		else if(0x8000 <= address)
+			value = currentPBanks[0][(address - 0x8000)];
+		else if(0x6000 <= address)
+			value = extraRAM[address - 0x6000];
+	}
+
+	void SetV(uint16_t address, uint8_t value, bool)
+	{
+		if(0x3000 <= address)
+			address -= 0x1000;
+
+		if(address < 0x3000)
+			extraVRAM[address] = value;
+	}
+
+	void GetV(uint16_t address, uint8_t &value, bool)
+	{
+		if(0x3000 <= address)
+			address -= 0x1000;
+
+		if(tileChunks == 0)
+			value = extraVRAM[address];
+		else
+		{
+			if(address < 0x0400)
+				value = currentVBanks[0][address];
+			else if(address < 0x0800)
+				value = currentVBanks[1][address - 0x0400];
+			else if(address < 0x0C00)
+				value = currentVBanks[2][address - 0x0800];
+			else if(address < 0x1000)
+				value = currentVBanks[3][address - 0x0C00];
+			else if(address < 0x1400)
+				value = currentVBanks[4][address - 0x1000];
+			else if(address < 0x1800)
+				value = currentVBanks[5][address - 0x1400];
+			else if(address < 0x1C00)
+				value = currentVBanks[6][address - 0x1800];
+			else if(address < 0x2000)
+				value = currentVBanks[7][address - 0x1C00];
+			else if(address < 0x3000)
+				value = extraVRAM[address];
+		}
+	}
+
+	void SetIO(uint16_t address, uint8_t value)
+	{
+		if(address == 0x16)
+			namcoRegister = ((value & 0x01) == 0) ? true : false;
+	}
+
+	uint8_t GetIO(uint16_t address)
+	{
+		if(address == 0x17)
+		{
+			uint8_t value = namcoRegister;
+			return value << 1;
+		}
+		return 0;
 	}
 };

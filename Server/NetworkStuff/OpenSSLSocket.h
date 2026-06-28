@@ -88,7 +88,21 @@ public:
 
 	bool IsOpen(void)
 	{
-		return 0 <= socket && sslConnection != nullptr && sslContext != nullptr;
+		std::lock_guard<std::mutex> g(lock);
+		if(socket < 0 || !sslConnection || !sslContext)
+			return false;
+		
+		pollfd request;
+		std::memset(&request, 0, sizeof(pollfd));
+		request.fd = socket;
+		poll(&request, 1, 0);
+		if(request.revents != 0)
+		{
+			InternalClose();
+			return false;
+		}
+		
+		return true;
 	}
 
 	void Close(void)
@@ -154,13 +168,31 @@ public:
 		}
 	}
 
-	bool HasData(void)
+	unsigned int ReadSomeData(void *buffer, unsigned int size)
 	{
 		std::lock_guard<std::mutex> g(lock);
 		if(socket < 0 || !sslConnection || !sslContext)
-			return false;
+			return 0;
 
-		return 0 < SSL_pending(sslConnection);
+		unsigned int readC = 0;
+		unsigned char *bufferC = reinterpret_cast<unsigned char*>(buffer);
+		while(readC < size)
+		{
+			ERR_clear_error();
+			int ret = SSL_read(sslConnection, bufferC + readC, size - readC);
+			int error = SSL_get_error(sslConnection, ret);
+			if(error == SSL_ERROR_NONE)
+				readC += ret;
+			else if(error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE)
+				return readC;
+			else
+			{
+				InternalClose();
+				return readC;
+			}
+		}
+
+		return readC;
 	}
 };
 

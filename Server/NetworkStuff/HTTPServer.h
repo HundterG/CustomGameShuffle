@@ -54,6 +54,7 @@ class HTTPServer
 
 	void AsyncAccepterFunction(void)
 	{
+		bool doSafetySleep = false;
 		while(accepter.IsGood() && !shouldClose)
 		{
 			SocketBase *newConnection = accepter.Accept();
@@ -62,7 +63,12 @@ class HTTPServer
 				std::unique_lock<std::mutex> lock(socketLock);
 				waitingSockets.push_back(newConnection);
 				socketCV.notify_one();
+				doSafetySleep = false;
 			}
+			else if(doSafetySleep)
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			else
+				doSafetySleep = true;
 		}
 
 		shouldClose = true;
